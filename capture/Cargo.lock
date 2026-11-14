@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "accessibility-sys",
  "core-foundation",
+ "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "rusqlite",
@@ -176,6 +177,7 @@ dependencies = [
  "bitflags",
  "libc",
  "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 

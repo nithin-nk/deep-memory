@@ -293,3 +293,10 @@ scores.)
 - Open gap: redaction happens at indexing, so `frames.text` on disk is
   still raw. Options: redact in the daemon before insert (needs the rules in
   Rust), or shorten raw retention in Slice 8. Decide before Slice 4.
+- Follow-up after user feedback ("cannot see the app in the menu bar,
+  shortcut not working"): added a menu bar status item (`◉` recording, `⏸`
+  paused) with Pause/Resume and Quit. The daemon is now an accessory
+  NSApplication and pumps AppKit events each tick instead of
+  `RunCurrentEventLoop`. Process-level smoke test passes; the user confirmed the menu bar item
+  and the shortcut both work. Cause of the
+  reported shortcut failure was not reproduced.

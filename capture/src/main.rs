@@ -8,7 +8,7 @@
 //!
 //! Privacy controls (all state lives in ~/.deepmem, override with DEEPMEM_HOME):
 //! - `paused` flag file: while it exists nothing is recorded. Toggled by
-//!   Ctrl+Option+Cmd+P or by `deepmem pause` / `deepmem resume`.
+//!   Ctrl+Option+Cmd+P, the menu bar item, or `deepmem pause` / `deepmem resume`.
 //! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded.
 
 use accessibility_sys::{
@@ -22,7 +22,14 @@ use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::string::CFString;
 use core_foundation::url::CFURL;
-use objc2_app_kit::NSWorkspace;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject};
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSEventMask, NSMenu, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSWorkspace,
+};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSString};
 use rusqlite::Connection;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -61,8 +68,7 @@ fn idle_secs() -> f64 {
 
 // --- pause shortcut -------------------------------------------------------
 // Carbon hot keys need no permission (an event tap would need Input
-// Monitoring). RunCurrentEventLoop both delivers them and pumps the main run
-// loop, which NSWorkspace needs to stay current.
+// Monitoring). They are delivered by the NSApplication event pump in `main`.
 
 #[repr(C)]
 struct EventHotKeyID {
@@ -97,13 +103,13 @@ extern "C" {
         user_data: *mut c_void,
         out_ref: *mut *mut c_void,
     ) -> i32;
-    fn RunCurrentEventLoop(timeout_secs: f64) -> i32;
 }
 
-static HOTKEY_PRESSED: AtomicBool = AtomicBool::new(false);
+/// Set by the shortcut and by the menu bar item; the main loop flips the flag file.
+static TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_hotkey(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
-    HOTKEY_PRESSED.store(true, Ordering::Relaxed);
+    TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
     0
 }
 
@@ -131,12 +137,82 @@ fn register_pause_hotkey() -> bool {
 
 fn notify(message: &'static str) {
     eprintln!("deepmem-capture: {message}");
-    // ponytail: notification through osascript; a menu bar item needs a full
-    // NSApplication. Add one when the daemon gets an app bundle (Slice 10).
+    // ponytail: notification through osascript; use UserNotifications when
+    // the daemon gets an app bundle (Slice 10).
     thread::spawn(move || {
         let script = format!("display notification \"{message}\" with title \"deep-memory\"");
         let _ = Command::new("osascript").args(["-e", &script]).status();
     });
+}
+
+// --- menu bar item --------------------------------------------------------
+
+define_class!(
+    // Receives the "Pause capture" menu click.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "DeepmemMenuTarget"]
+    struct MenuTarget;
+
+    impl MenuTarget {
+        #[unsafe(method(togglePause:))]
+        fn toggle_pause(&self, _sender: Option<&AnyObject>) {
+            TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+        }
+    }
+);
+
+/// Shows capture state in the menu bar: "◉" recording, "⏸" paused.
+struct MenuBar {
+    mtm: MainThreadMarker,
+    item: Retained<NSStatusItem>,
+    state_line: Retained<NSMenuItem>,
+    toggle: Retained<NSMenuItem>,
+    _target: Retained<MenuTarget>, // menu items hold their target weakly
+}
+
+impl MenuBar {
+    fn new(mtm: MainThreadMarker) -> Self {
+        let menu_item = |title: &str, action| unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                action,
+                &NSString::from_str(""),
+            )
+        };
+        let target: Retained<MenuTarget> =
+            unsafe { msg_send![super(MenuTarget::alloc(mtm).set_ivars(())), init] };
+        let state_line = menu_item("", None); // no action: shown greyed out
+        let toggle = menu_item("", Some(sel!(togglePause:)));
+        unsafe { toggle.setTarget(Some(&target)) };
+        let quit = menu_item("Quit deep-memory capture", Some(sel!(terminate:)));
+
+        let menu = NSMenu::new(mtm);
+        menu.addItem(&state_line);
+        menu.addItem(&toggle);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        menu.addItem(&quit);
+
+        let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0); // variable width
+        item.setMenu(Some(&menu));
+        let bar = MenuBar { mtm, item, state_line, toggle, _target: target };
+        bar.set_paused(false);
+        bar
+    }
+
+    fn set_paused(&self, paused: bool) {
+        let (icon, state, action) = if paused {
+            ("⏸", "deep-memory: paused", "Resume capture  (⌃⌥⌘P)")
+        } else {
+            ("◉", "deep-memory: recording", "Pause capture  (⌃⌥⌘P)")
+        };
+        if let Some(button) = self.item.button(self.mtm) {
+            button.setTitle(&NSString::from_str(icon));
+        }
+        self.state_line.setTitle(&NSString::from_str(state));
+        self.toggle.setTitle(&NSString::from_str(action));
+    }
 }
 
 // --- what must never be recorded ------------------------------------------
@@ -404,6 +480,13 @@ fn main() -> rusqlite::Result<()> {
              this binary, then start it again."
         );
     }
+    // Accessory app: menu bar item, no Dock icon.
+    let mtm = MainThreadMarker::new().expect("must run on the main thread");
+    let ns_app = NSApplication::sharedApplication(mtm);
+    ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    ns_app.finishLaunching();
+    let menu_bar = MenuBar::new(mtm);
+
     let home = home_dir();
     fs::create_dir_all(&home).expect("cannot create deep-memory directory");
     let denylist = load_denylist(&home);
@@ -432,9 +515,19 @@ fn main() -> rusqlite::Result<()> {
     // Switch to AXObserver + event tap only if polling cost shows up in
     // profiles; an event tap needs the Input Monitoring permission.
     loop {
-        unsafe { RunCurrentEventLoop(TICK_SECS) };
+        // Handle menu clicks and the shortcut for one tick. This also pumps
+        // the main run loop, which NSWorkspace needs to stay current.
+        let tick_end = NSDate::dateWithTimeIntervalSinceNow(TICK_SECS);
+        while let Some(event) = ns_app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            Some(&tick_end),
+            unsafe { NSDefaultRunLoopMode },
+            true,
+        ) {
+            ns_app.sendEvent(&event);
+        }
 
-        if HOTKEY_PRESSED.swap(false, Ordering::Relaxed) {
+        if TOGGLE_REQUESTED.swap(false, Ordering::Relaxed) {
             let result = if paused_flag.exists() {
                 fs::remove_file(&paused_flag)
             } else {
@@ -448,6 +541,7 @@ fn main() -> rusqlite::Result<()> {
         // `deepmem` CLI cannot disagree, and a pause survives a restart.
         let paused = paused_flag.exists();
         if paused != was_paused {
+            menu_bar.set_paused(paused);
             notify(if paused { "Capture paused" } else { "Capture resumed" });
             was_paused = paused;
         }

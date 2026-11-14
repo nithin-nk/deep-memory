@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 accessibility-sys = "0.1"
 core-foundation = "0.10"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSRunningApplication", "libc"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSRunningApplication", "libc", "NSApplication", "NSResponder", "NSEvent", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSView", "NSMenu", "NSMenuItem", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSObject", "NSRunLoop", "NSString"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "1.2.1"

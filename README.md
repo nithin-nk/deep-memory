@@ -51,8 +51,10 @@ enable their accessibility tree, otherwise they expose no page content.
 
 ## Privacy controls
 
-- **Pause:** press Ctrl+Option+Cmd+P, or run `deepmem pause` / `deepmem
-  resume`. A notification confirms the change. While paused nothing is
+- **Menu bar:** the daemon shows `◉` while recording and `⏸` while paused.
+  Its menu has Pause/Resume and Quit.
+- **Pause:** press Ctrl+Option+Cmd+P, use the menu bar item, or run
+  `deepmem pause` / `deepmem resume`. A notification confirms the change. While paused nothing is
   recorded, and a pause survives a daemon restart.
 - **Never recorded:** password fields, private browsing windows (recognised
   by the marker in the window title), and password managers. Add your own
