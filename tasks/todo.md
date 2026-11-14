@@ -124,11 +124,11 @@ Without this, later slices cannot show they improve anything.
 
 ## Slice 6: Project scoping
 
-- [ ] Assign each session to a project: git repository root derived from
+- [x] Assign each session to a project: git repository root derived from
       editor window title, terminal working directory, or matching URL
       (repository host). Unmatched sessions go to `personal`.
-- [ ] Memories are written under `memories/<project>/`.
-- [ ] MCP: server resolves the calling agent's project from its working
+- [x] Memories are written under `memories/<project>/`.
+- [x] MCP: server resolves the calling agent's project from its working
       directory. `recall` and `current_context` return only that project's
       memories by default. `personal` is never returned unless the user
       allows it in config.
@@ -364,7 +364,7 @@ scores.)
     it out of project-scoped recall.
 - The thinking build `qwen3-vl:8b` is still on disk, unused (6.2 GB).
 
-### Slice 5 (harness done; second-model comparison and user cases pending)
+### Slice 5 (done; user's own cases pending)
 
 - Verified: 24 Python tests pass (4 new). On a real fixture (906 frames, 4
   sessions) with `qwen3-vl:8b-instruct`: 5 episodes, 1 dropped reply,
@@ -388,5 +388,43 @@ scores.)
 - `deepmem forget` deletes the fixture file.
 - User decision (2026-11-14): Gmail may be captured and indexed; no default
   mail denylist.
-- Open: "Done when" asks for two models with comparable scores; a second
-  run was in progress at commit time. The user still owes about 15 cases.
+- "Done when" met: the same fixture and cases with the thinking build
+  `qwen3-vl:8b` gave 0 episodes (6 dropped replies), 697.7 s, 0/8 from
+  memories and 6/8 including screen text, against 5 episodes, 120.6 s and
+  4/8 for `qwen3-vl:8b-instruct`. The harness separates the two clearly.
+- Open: the user still owes about 15 cases.
+
+### Slice 6 (done; MCP roots not yet exercised by a real client)
+
+- Verified: 31 Python tests pass (7 new). An agent scoped to project
+  `alpha` gets neither `beta`'s memories or screen text nor `personal`
+  mail; an unknown caller gets nothing; moving a memory file changes its
+  project. On the real database the labels are: 991 frames `deep-memory`,
+  149 `personal` (Gmail, YouTube, Reddit, Finder, System Settings); a query
+  for the bank notice returns nothing when scoped to `deep-memory`.
+- Not verified: a real MCP client answering the roots request. Claude Code
+  must be restarted on the merged code and asked to recall something.
+- Changes from plan:
+  - Labels are per window, not per session, and one session yields one
+    episode per project. A session-level label would have put mail and
+    video into the project's memory.
+  - Raw frames carry a project label too (index `frames_fts_v3`), because
+    `recall` also returns screen text.
+  - A window is labelled from all its captures in a half-hour bucket, in two
+    passes. Frame-by-frame labelling put 617 of 788 chat-window captures in
+    `personal` and depended on the order in which projects were first seen.
+  - The caller's directory comes from MCP roots (3 s timeout), then
+    `DEEPMEM_PROJECT_DIR` or `CLAUDE_PROJECT_DIR`. The server's own working
+    directory cannot be used: `uv run --directory` sets it to this package.
+  - Default for an agent outside any repository: sees nothing
+    (`outside_project = "none"`). Chosen by the agent; the user was asked
+    and started the slice without answering.
+- Known limits:
+  - Projects are keyed by directory name; two repositories with the same
+    name share memories.
+  - `~/Desktop` is itself a git repository on the development machine, so
+    paths directly under it label as project `Desktop`.
+  - Memories written before this slice sit in `memories/_unsorted/` and are
+    visible to no scoped agent. Re-distilling moves them into projects.
+  - `current_context` for a scoped agent hides windows that never showed a
+    project sign.

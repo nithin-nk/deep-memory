@@ -4,6 +4,7 @@
 # query    keywords an agent would pass to `recall` (all words must match)
 # expect   one string or a list; every string must appear in what recall
 #          returns (case-insensitive)
+# project  optional: search as an agent working in that project would
 # question optional note for humans
 
 [[case]]

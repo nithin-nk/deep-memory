@@ -52,7 +52,9 @@ def load_fixture(path: Path) -> list[distill.Frame]:
 
 def load_cases(path: Path) -> list[dict]:
     """Cases from TOML: `[[case]]` with `query` (keywords for recall) and
-    `expect` (strings that must all appear); `question` is a note for humans."""
+    `expect` (strings that must all appear). Optional: `project` limits recall
+    to that project, as for an agent working in it; `question` is a note for
+    humans."""
     with path.open("rb") as file:
         cases = tomllib.load(file).get("case", [])
     for case in cases:
@@ -127,7 +129,7 @@ def run(fixture: Path, cases_path: Path, config: dict, model=distill.call_ollama
 
         results = []
         for case in cases:
-            found = store.search(case["query"], 5, db=db)
+            found = store.search(case["query"], 5, db=db, visible={case["project"]} if case.get("project") else None)
             memory_text = "\n".join(store.read_memory(Path(r["file"]))[1] for r in found if r["kind"] == "memory")
             screen_text = "\n".join(r["snippet"] for r in found if r["kind"] == "screen")
             if _contains_all(memory_text, case["expect"]):

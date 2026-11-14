@@ -1,7 +1,8 @@
 """Turns captured frames into episodes: short Markdown notes on what the user did.
 
-Pipeline: frames -> sessions (split on idle gaps, no model) -> compacted text
-per window -> local model -> validated JSON -> Markdown file in `memories/`.
+Pipeline: frames -> sessions (split on idle gaps, no model) -> windows, each
+labelled with its project -> per project: compacted text -> local model ->
+validated JSON -> Markdown file in `memories/<project>/`.
 """
 
 import json
@@ -15,12 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from deepmem import store
+from deepmem import projects, store
 
 _MIN_WINDOW_CHARS = 300  # every window keeps at least this much
 
 Frame = namedtuple("Frame", "id ts app title url text")
-Window = namedtuple("Window", "app title url start end text")
+Window = namedtuple("Window", "app title url start end text project")
 
 
 class ModelUnavailable(Exception):
@@ -76,14 +77,10 @@ def _clip(text: str, limit: int) -> str:
     return text[:head] + "\n[...]\n" + text[-(limit - head) :]
 
 
-def compact(session: list[Frame], budget: int) -> list[Window]:
+def windows_of(session: list[Frame], known: set[str] | None = None) -> list[Window]:
     """One entry per window (app + title), in order of first appearance, with
-    the texts cut so that together they fit `budget` characters.
-
-    Small windows keep all their text; the large ones share what is left
-    equally. A session then normally yields one episode instead of several
-    overlapping parts.
-    """
+    all its unique text and its project label."""
+    known = set() if known is None else known
     groups: dict[tuple[str, str], list[Frame]] = {}
     for frame in session:
         groups.setdefault((frame.app, frame.title), []).append(frame)
@@ -91,8 +88,18 @@ def compact(session: list[Frame], budget: int) -> list[Window]:
     for (app, title), frames in groups.items():
         text = "\n".join(_unique_lines([f.text for f in frames]))
         url = next((f.url for f in reversed(frames) if f.url), None)
-        windows.append(Window(app, title, url, frames[0].ts, frames[-1].ts, text))
+        project = projects.of_window(title, url, text, known)
+        windows.append(Window(app, title, url, frames[0].ts, frames[-1].ts, text, project))
+    return windows
 
+
+def fit(windows: list[Window], budget: int) -> list[Window]:
+    """Cut window texts so that together they fit `budget` characters.
+
+    Small windows keep all their text; the large ones share what is left
+    equally. A project's part of a session then normally yields one episode.
+    """
+    windows = list(windows)
     remaining, left = budget, len(windows)
     for index in sorted(range(len(windows)), key=lambda i: len(windows[i].text)):
         share = max(_MIN_WINDOW_CHARS, remaining // left)
@@ -101,6 +108,10 @@ def compact(session: list[Frame], budget: int) -> list[Window]:
         remaining -= len(windows[index].text)
         left -= 1
     return windows
+
+
+def compact(session: list[Frame], budget: int) -> list[Window]:
+    return fit(windows_of(session), budget)
 
 
 def chunk(windows: list[Window], budget: int) -> list[list[Window]]:
@@ -159,7 +170,9 @@ def _clock(ts_ms: int) -> str:
 
 
 def build_prompt(windows: list[Window]) -> str:
-    parts = [f"Captured between {_clock(windows[0].start)} and {_clock(max(w.end for w in windows))}.\n"]
+    project = windows[0].project
+    about = "Personal activity, outside any project." if project == projects.PERSONAL else f"Project: {project}."
+    parts = [f"{about} Captured between {_clock(windows[0].start)} and {_clock(max(w.end for w in windows))}.\n"]
     for w in windows:
         url = f' url="{w.url}"' if w.url else ""
         parts.append(
@@ -234,8 +247,10 @@ def distill(windows: list[Window], config: dict, model=call_ollama, log=print) -
 
 def write_episode(episode: dict, windows: list[Window], frames: list[Frame], part: int, model_name: str, memories: Path) -> Path:
     start, end = windows[0].start, max(w.end for w in windows)
+    project = windows[0].project
     front = {
         "type": "episode",
+        "project": project,
         "start": store.iso(start),
         "end": store.iso(end),
         "apps": sorted({w.app for w in windows}),
@@ -248,8 +263,8 @@ def write_episode(episode: dict, windows: list[Window], frames: list[Frame], par
         if episode[field]:
             lines += [f"## {heading}", ""] + [f"- {item}" for item in episode[field]] + [""]
 
-    # ponytail: everything lands in `_unsorted`; Slice 6 assigns projects.
-    directory = memories / "_unsorted"
+    # The directory is what scopes a memory; moving the file moves the memory.
+    directory = memories / projects.directory_name(project)
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.fromtimestamp(start / 1000).strftime("%Y-%m-%dT%H%M%S")
     path = directory / (f"{stamp}.md" if part == 0 else f"{stamp}-part{part + 1}.md")
@@ -292,18 +307,27 @@ def run_once(db: Path = store.DB, config: dict | None = None, model=call_ollama,
                 log(f"distill: 1 session still open, closes by {_clock(closes)} (or after {config['session_gap_minutes']} idle minutes)")
                 sessions.pop()
 
+        known = store.known_projects(con)
         for session in sessions:
-            windows = compact(session, budget)
-            if sum(len(w.text) for w in windows) >= _MIN_SESSION_CHARS:
+            # One episode per project touched in the session, so that personal
+            # browsing never ends up inside a project's memory.
+            by_project: dict[str, list[Window]] = {}
+            for window in windows_of(session, known):
+                by_project.setdefault(window.project, []).append(window)
+            for project, project_windows in by_project.items():
+                windows = fit(project_windows, budget)
+                if sum(len(w.text) for w in windows) < _MIN_SESSION_CHARS:
+                    continue
                 for part, group in enumerate(chunk(windows, budget)):
                     episode = distill(group, config, model, log)  # ModelUnavailable leaves the cursor untouched
                     if episode is None:
-                        log(f"distill: dropped frames {session[0].id}-{session[-1].id} part {part + 1}, no usable reply")
+                        log(f"distill: dropped frames {session[0].id}-{session[-1].id} ({project}) part {part + 1}, no usable reply")
                         continue
                     path = write_episode(episode, group, session, part, config["model"], memories)
                     log(f"distill: wrote {path}")
                     written += 1
             store.set_meta(con, "distilled_frame_id", session[-1].id)
+            store.set_meta(con, "projects", json.dumps(sorted(known)))
             con.commit()
     finally:
         con.close()

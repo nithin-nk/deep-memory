@@ -4,10 +4,9 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 5 of [tasks/todo.md](tasks/todo.md). Records the focused
-window's text, distills work sessions into Markdown memories with a local
-model, lets agents search both, and can score itself on frozen input. macOS
-only.
+Status: Slice 6 of [tasks/todo.md](tasks/todo.md). Records the focused
+window's text, distills work sessions into per-project Markdown memories with
+a local model, and lets each agent search only its own project. macOS only.
 
 ## Requirements
 
@@ -64,8 +63,8 @@ uv run --directory /absolute/path/to/deep-memory/memory deepmem distill
 
 - A session ends after 5 minutes without captures, or after 30 minutes.
   A run that finds only an open session says when it will close.
-- Episodes are plain files in `~/.deepmem/memories/`. Edit or delete them
-  freely; the search index follows the files.
+- Episodes are plain files in `~/.deepmem/memories/<project>/`. Edit, move
+  or delete them freely; the search index follows the files.
 - `recall` returns matching memories first, then raw screen text.
 - The model runs only on mains power or while you are away; `--force`
   overrides, `--watch` repeats every 5 minutes.
@@ -83,6 +82,31 @@ session_max_minutes = 30
 distill_on_battery = false
 ```
 
+## Projects and who can read what
+
+A project is a git repository on this machine, named by its directory.
+Each captured window is labelled from the file paths it shows, its
+repository URL (GitHub, GitLab, Bitbucket) or an editor title such as
+`store.py — deep-memory`. Windows with no such sign are `personal`.
+
+- One session produces one episode per project it touched, stored in
+  `~/.deepmem/memories/<project>/`. Move a file to another directory to
+  change its project.
+- An agent sees only the project of its workspace root: memories, raw
+  screen text and recent activity. Not other projects, not `personal`.
+- An agent outside any repository sees nothing.
+
+Change the defaults in `~/.deepmem/config.toml`:
+
+```toml
+share_personal = false      # true: agents in a project also read `personal`
+outside_project = "none"    # or "personal", or "all"
+```
+
+The server asks the client for its workspace root (MCP roots). For a client
+without that, set `DEEPMEM_PROJECT_DIR` in the server's environment. The
+`deepmem` CLI is not scoped: it is you, not an agent.
+
 ## Evaluation
 
 Compare models, prompts and settings on the same input.
@@ -94,7 +118,8 @@ deepmem eval                      # configured model
 deepmem eval --model qwen3-vl:4b  # any other pulled model
 ```
 
-A case is a `recall` query plus the facts a good answer must contain. The
+A case is a `recall` query plus the facts a good answer must contain, and
+optionally a `project` to search as an agent in that project would. The
 report shows how many cases are answered from memories, how many only from
 raw screen text, how many facts survived distillation at all, time per
 session, dropped model replies, and entities the model named that never

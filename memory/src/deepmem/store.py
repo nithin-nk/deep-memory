@@ -15,6 +15,8 @@ import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from deepmem import projects
+
 HOME = Path(os.environ.get("DEEPMEM_HOME", Path.home() / ".deepmem"))
 DB = Path(os.environ.get("DEEPMEM_DB", HOME / "db.sqlite"))
 PAUSED_FLAG = HOME / "paused"
@@ -27,6 +29,8 @@ CONFIG_DEFAULTS = {
     "session_gap_minutes": 5,  # idle time that ends a session
     "session_max_minutes": 30,
     "distill_on_battery": False,
+    "share_personal": False,  # may agents inside a project also read `personal` memories?
+    "outside_project": "none",  # what an agent outside any repository reads: none | personal | all
 }
 
 
@@ -43,8 +47,9 @@ def load_config(path: Path | None = None) -> dict:
 
 # The index stores redacted text. Change the name whenever redaction rules
 # change, so the old index is dropped and rebuilt from `frames`.
-INDEX = "frames_fts_v2"
-_OLD_INDEXES = ("frames_fts",)
+INDEX = "frames_fts_v3"  # v3 adds the project column
+_OLD_INDEXES = ("frames_fts", "frames_fts_v2")
+_LABEL_BUCKET_MS = 30 * 60 * 1000
 
 
 # --- redaction --------------------------------------------------------------
@@ -102,40 +107,87 @@ def iso(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def recent_events(db: Path = DB, limit: int = 20) -> list[dict]:
-    """Newest-first window focus events. Empty if capture has never run."""
+def known_projects(con: sqlite3.Connection) -> set[str]:
+    return set(json.loads(get_meta(con, "projects") or "[]"))
+
+
+def recent_events(db: Path = DB, limit: int = 20, visible: set[str] | None = None) -> list[dict]:
+    """Newest-first window focus events, limited to the `visible` projects
+    (None = all). Empty if capture has never run."""
     if not db.exists():
         return []
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        # Over-fetch: events of other projects are filtered out below.
         rows = con.execute(
-            "SELECT ts, app, title FROM events ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT ts, app, title FROM events ORDER BY id DESC LIMIT ?", (limit if visible is None else limit * 20,)
         ).fetchall()
+        known, labelled = set(), {}
+        if visible is not None:
+            try:  # labels the frame index already worked out for these windows
+                known = known_projects(con)
+                labelled = {
+                    (app, title): project
+                    for app, title, project in con.execute(
+                        f"SELECT app, title, project FROM {INDEX} ORDER BY rowid LIMIT -1 OFFSET "
+                        f"max(0, (SELECT count(*) FROM {INDEX}) - 5000)"
+                    )
+                }
+            except sqlite3.OperationalError:  # nothing indexed yet
+                pass
     except sqlite3.OperationalError:  # file exists but capture has not created the table yet
         return []
     finally:
         con.close()
-    return [{"time": iso(ts), "app": app, "title": redact(title)} for ts, app, title in rows]
+
+    def project_of(app: str, title: str) -> str:
+        return labelled.get((app, redact(title))) or projects.of_window(title, None, "", set(known))
+
+    events = [
+        {"time": iso(ts), "app": app, "title": redact(title)}
+        for ts, app, title in rows
+        if visible is None or project_of(app, title) in visible
+    ]
+    return events[:limit]
 
 
 def sync_index(con: sqlite3.Connection) -> None:
-    """Copy frames not yet indexed into the FTS5 table, redacted."""
-    # ponytail: runs on every search; move to the distiller's timer (Slice 4)
-    # if a first search after a long gap becomes slow.
+    """Copy frames not yet indexed into the FTS5 table, redacted and labelled
+    with their project."""
+    # ponytail: runs on every search; move to the distiller's timer if a
+    # first search after a long gap becomes slow.
     for old in _OLD_INDEXES:
         con.execute(f"DROP TABLE IF EXISTS {old}")
     con.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {INDEX} "
-        "USING fts5(text, app, title, url UNINDEXED, ts UNINDEXED)"
+        "USING fts5(text, app, title, url UNINDEXED, ts UNINDEXED, project UNINDEXED)"
     )
     new_frames = con.execute(
         "SELECT id, text, app, title, url, ts FROM frames "
         f"WHERE id > (SELECT coalesce(max(rowid), 0) FROM {INDEX})"
     ).fetchall()
+    if not new_frames:
+        return
+    # Label a window from all its captures in a half-hour bucket, not frame by
+    # frame: one capture of a chat or terminal often shows no path at all.
+    buckets: dict[tuple, list] = {}
+    for frame in new_frames:
+        _, text, app, title, url, ts = frame
+        buckets.setdefault((app, title, ts // _LABEL_BUCKET_MS), []).append(frame)
+    known = known_projects(con)
+    labels = {}
+    for _ in range(2):  # second pass: names learned late also label early windows
+        for key, frames in buckets.items():
+            url = next((f[4] for f in reversed(frames) if f[4]), None)
+            labels[key] = projects.of_window(key[1], url, "\n".join(f[1] for f in frames), known)
     con.executemany(
-        f"INSERT INTO {INDEX} (rowid, text, app, title, url, ts) VALUES (?, ?, ?, ?, ?, ?)",
-        [(id_, redact(text), app, redact(title), url and redact(url), ts) for id_, text, app, title, url, ts in new_frames],
+        f"INSERT INTO {INDEX} (rowid, text, app, title, url, ts, project) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (id_, redact(text), app, redact(title), url and redact(url), ts, labels[(app, title, ts // _LABEL_BUCKET_MS)])
+            for id_, text, app, title, url, ts in new_frames
+        ],
     )
+    set_meta(con, "projects", json.dumps(sorted(known)))
     con.commit()
 
 
@@ -166,23 +218,28 @@ def read_memory(path: Path) -> tuple[dict, str]:
 
 
 def sync_memory_index(con: sqlite3.Connection, memories: Path) -> None:
-    """Rebuild the memory index when any Markdown file was added, edited or
-    removed. The files are the source of truth; users may edit them."""
+    """Rebuild the memory index when any Markdown file was added, edited,
+    moved or removed. The files are the source of truth; users may edit them.
+    A memory's project is the directory it lies in."""
     # ponytail: full rebuild on any change; index per file if this gets slow
     # (thousands of files).
     files = sorted(memories.rglob("*.md")) if memories.exists() else []
-    signature = f"{len(files)}:{max((f.stat().st_mtime_ns for f in files), default=0)}"
-    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(body, path UNINDEXED, start UNINDEXED)")
-    if get_meta(con, "memories_signature") == signature:
+    signature = "|".join(f"{f.relative_to(memories)}:{f.stat().st_mtime_ns}" for f in files)
+    con.execute("DROP TABLE IF EXISTS memories_fts")  # pre-project index
+    con.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_v2 "
+        "USING fts5(body, path UNINDEXED, start UNINDEXED, project UNINDEXED)"
+    )
+    if get_meta(con, "memories_signature_v2") == signature:
         return
-    con.execute("DELETE FROM memories_fts")
+    con.execute("DELETE FROM memories_fts_v2")
     for file in files:
         front, body = read_memory(file)
         con.execute(
-            "INSERT INTO memories_fts (body, path, start) VALUES (?, ?, ?)",
-            (redact(body), str(file), str(front.get("start", ""))),
+            "INSERT INTO memories_fts_v2 (body, path, start, project) VALUES (?, ?, ?, ?)",
+            (redact(body), str(file), str(front.get("start", "")), file.relative_to(memories).parts[0]),
         )
-    set_meta(con, "memories_signature", signature)
+    set_meta(con, "memories_signature_v2", signature)
     con.commit()
 
 
@@ -192,27 +249,32 @@ def _match_expression(query: str) -> str:
     return " ".join('"' + word.replace('"', '""') + '"' for word in query.split())
 
 
-def search(query: str, limit: int = 10, db: Path = DB) -> list[dict]:
-    """Distilled memories first, then raw screen text (one result per window)."""
+def search(query: str, limit: int = 10, db: Path = DB, visible: set[str] | None = None) -> list[dict]:
+    """Distilled memories first, then raw screen text (one result per window),
+    limited to the `visible` projects (None = all)."""
     match = _match_expression(query)
-    if not match or not db.exists():
+    if not match or not db.exists() or visible == set():
         return []
     limit = max(1, min(limit, 50))
+    scope, scope_args = "", ()
+    if visible is not None:
+        scope = f" AND project IN ({', '.join('?' * len(visible))})"
+        scope_args = tuple(sorted(visible))
     con = sqlite3.connect(db, timeout=5)
     try:
         sync_memory_index(con, db.parent / "memories")
         memory_rows = con.execute(
-            "SELECT start, path, snippet(memories_fts, 0, '', '', ' … ', 60) "
-            "FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
-            (match, limit),
+            "SELECT start, path, project, snippet(memories_fts_v2, 0, '', '', ' … ', 60) "
+            f"FROM memories_fts_v2 WHERE memories_fts_v2 MATCH ?{scope} ORDER BY rank LIMIT ?",
+            (match, *scope_args, limit),
         ).fetchall()
         try:
             sync_index(con)
             frame_rows = con.execute(
-                f"SELECT ts, app, title, url, snippet({INDEX}, 0, '', '', ' … ', 40) "
-                f"FROM {INDEX} WHERE {INDEX} MATCH ? ORDER BY rank, ts DESC LIMIT ?",
+                f"SELECT ts, app, title, url, project, snippet({INDEX}, 0, '', '', ' … ', 40) "
+                f"FROM {INDEX} WHERE {INDEX} MATCH ?{scope} ORDER BY rank, ts DESC LIMIT ?",
                 # The same window is captured many times; over-fetch, then keep one each.
-                (match, limit * 10),
+                (match, *scope_args, limit * 10),
             ).fetchall()
         except sqlite3.OperationalError:  # capture has not created `frames` yet
             frame_rows = []
@@ -220,17 +282,17 @@ def search(query: str, limit: int = 10, db: Path = DB) -> list[dict]:
         con.close()
 
     results = [
-        {"kind": "memory", "time": start, "snippet": snippet, "file": path}
-        for start, path, snippet in memory_rows
+        {"kind": "memory", "project": project, "time": start, "snippet": snippet, "file": path}
+        for start, path, project, snippet in memory_rows
     ]
     seen = set()
-    for ts, app, title, url, snippet in frame_rows:
+    for ts, app, title, url, project, snippet in frame_rows:
         if len(results) >= limit:
             break
         if (app, title) in seen:
             continue
         seen.add((app, title))
-        result = {"kind": "screen", "time": iso(ts), "app": app, "title": title, "snippet": snippet}
+        result = {"kind": "screen", "project": project, "time": iso(ts), "app": app, "title": title, "snippet": snippet}
         if url:
             result["url"] = url
         results.append(result)
