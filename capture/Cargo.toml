@@ -1,0 +1,11 @@
+[package]
+name = "deepmem-capture"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+accessibility-sys = "0.1"
+core-foundation = "0.10"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSRunningApplication", "libc"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

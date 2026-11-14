@@ -1,0 +1,16 @@
+[project]
+name = "deepmem"
+version = "0.1.0"
+description = "Local memory for coding agents: distillation and MCP server"
+requires-python = ">=3.11"
+dependencies = ["mcp>=2"]
+
+[project.scripts]
+deepmem-mcp = "deepmem.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
