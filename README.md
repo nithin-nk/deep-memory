@@ -4,10 +4,11 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 7 of [tasks/todo.md](tasks/todo.md). Records the focused
-window's text (from a screenshot when the window exposes none), distills work
-sessions into per-project Markdown memories with a local model, and lets each
-agent search only its own project. macOS only.
+Status: Slice 7 of [tasks/todo.md](tasks/todo.md), plus the desktop window.
+Records the focused window's text (from a screenshot when the window exposes
+none), distills work sessions into per-project Markdown memories with a local
+model, and lets each agent search only its own project. A window in the menu
+bar app shows the memories and the settings. macOS only.
 
 ## Requirements
 
@@ -222,20 +223,40 @@ real memories are not touched.
 The fixture (`~/.deepmem/eval/fixture.jsonl`) holds captured screen text.
 Keep it out of repositories. `deepmem forget` deletes it.
 
+## The window
+
+Click the menu bar item (`◉`) and choose **Open deep-memory…**, or start the
+daemon with `--window`.
+
+- **Memories:** read, search and delete memories. "Show in Finder" selects
+  the file so you can edit it in your own editor.
+- **Blocked sites:** websites and apps that are never recorded.
+- **Settings:** the values of `~/.deepmem/config.toml`, plus capture state.
+
+Changes are written to `config.toml` (your comments are kept) and apply at
+once. The window is part of the daemon and talks to it directly: no network
+port is opened.
+
 ## Privacy controls
 
 - **Menu bar:** the daemon shows `◉` while recording and `⏸` while paused.
-  Its menu has Pause/Resume and Quit.
+  Its menu has Pause/Resume, Open deep-memory… and Quit.
 - **Pause:** press Ctrl+Option+Cmd+P, use the menu bar item, or run
   `deepmem pause` / `deepmem resume`. A notification confirms the change. While paused nothing is
   recorded, and a pause survives a daemon restart.
 - **Never recorded:** password fields, private browsing windows (recognised
   by the marker in the window title), and password managers. Add your own
-  apps in `~/.deepmem/config.toml`, then restart the daemon:
+  apps and websites in the window, or in `~/.deepmem/config.toml`. No
+  restart is needed:
 
   ```toml
   denylist = ["Signal", "Messages"]
+  url_blocklist = ["bank.com", "example.com/private"]
   ```
+
+  A blocked site covers its subdomains; with a path, only that part of the
+  site. Nothing is stored for a blocked page: no text, title or address.
+  Blocking a site does not delete what was recorded from it earlier.
 
 - **Secrets:** API keys, tokens, private keys, passwords in `name = value`
   form and card numbers are replaced with `[REDACTED:kind]` by the daemon
@@ -252,7 +273,11 @@ Keep it out of repositories. `deepmem forget` deletes it.
 Run the CLI with `uv run --directory /absolute/path/to/deep-memory/memory deepmem <command>`.
 
 Known limits: secret detection is pattern based, so an unlabelled random
-string is not caught; the database is not encrypted yet (Slice 10).
+string is not caught; the database is not encrypted yet (Slice 10). A
+browser may not report a page's address on the first read after it gets
+focus. If the page then turns out to be blocked, what was stored in that
+moment is deleted again, but a search made in the same second can keep a
+copy in the search index until the next `deepmem forget`.
 
 ## Test
 
@@ -266,7 +291,8 @@ cd capture && cargo test
 
 ## Layout
 
-- `capture/`: Rust daemon. Only writes raw tables to the SQLite file.
+- `capture/`: Rust daemon and its window. Writes raw tables to the SQLite
+  file, reads and deletes memory files, edits `config.toml`.
 - `memory/`: Python package. Reads raw tables, owns the search index, serves MCP.
 - `eval/`: example evaluation cases.
 - `testdata/`: redaction fixtures shared by the Rust and Python tests.

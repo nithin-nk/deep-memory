@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>deep-memory</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --panel: #f5f5f7; --text: #1d1d1f; --muted: #6e6e73;
+    --line: #e2e2e6; --accent: #0a66d8; --on-accent: #ffffff; --select: #e4eefc;
+    --danger: #c9281c; --ok: #1f9d55; --warn: #b7791f; --field: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e20; --panel: #27272a; --text: #f2f2f4; --muted: #a0a0a8;
+      --line: #3a3a3f; --accent: #4c9bff; --on-accent: #0b1220; --select: #23364f;
+      --danger: #ff6b5e; --ok: #4cc38a; --warn: #e0a84a; --field: #2f2f33;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    -webkit-user-select: none; cursor: default;
+  }
+  button, input { font: inherit; color: inherit; }
+  button {
+    padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--field); white-space: nowrap;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+  button.danger { color: var(--danger); }
+  button.plain { border-color: transparent; background: none; color: var(--muted); padding: 2px 8px; }
+  button.plain:hover { color: var(--danger); }
+  button:disabled { opacity: .5; }
+  input[type=text], input[type=search], input[type=number] {
+    padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--field); min-width: 0; -webkit-user-select: text;
+  }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  h3 { font-size: 13px; margin: 18px 0 6px; }
+  p { margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  code { font: 12px ui-monospace, Menlo, monospace; background: var(--panel); padding: 1px 4px; border-radius: 4px; }
+
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  nav { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--line); }
+  nav button { border: 0; background: none; padding: 4px 14px; }
+  nav button[aria-selected=true] { background: var(--bg); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+  #state { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
+  .paused .dot { background: var(--warn); }
+
+  main { flex: 1; min-height: 0; display: flex; }
+  section { flex: 1; min-height: 0; min-width: 0; display: none; }
+  section.active { display: flex; }
+  .page { overflow: auto; padding: 22px 28px 40px; flex: 1; }
+  .page > div { max-width: 620px; }
+
+  /* Memories */
+  #list-pane { width: 320px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  #search { margin: 10px; }
+  #list { flex: 1; overflow: auto; margin: 0; padding: 0 6px 10px; list-style: none; }
+  #list li { padding: 8px 10px; border-radius: 7px; }
+  #list li[aria-selected=true] { background: var(--select); }
+  #list .when { font-weight: 600; }
+  #list .apps { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #list .summary {
+    margin-top: 2px; color: var(--muted); overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  #count { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  #reader { flex: 1; min-width: 0; overflow: auto; padding: 22px 28px 40px; }
+  #reader .tools { display: flex; align-items: center; gap: 8px; margin: 10px 0 18px; }
+  #reader article { max-width: 680px; font-size: 14px; line-height: 1.55; -webkit-user-select: text; cursor: text; }
+  #reader article ul { padding-left: 20px; margin: 0 0 10px; }
+  #reader article li { margin-bottom: 3px; overflow-wrap: anywhere; }
+  .empty { margin: auto; text-align: center; color: var(--muted); max-width: 340px; padding: 20px; }
+
+  /* Lists of sites and apps */
+  .add { display: flex; gap: 8px; margin: 10px 0 8px; }
+  .add input { flex: 1; }
+  .rows { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; }
+  .rows:empty { display: none; }
+  .rows li { display: flex; align-items: center; padding: 5px 6px 5px 12px; border-top: 1px solid var(--line); }
+  .rows li:first-child { border-top: 0; }
+  .rows span { flex: 1; overflow-wrap: anywhere; -webkit-user-select: text; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chips span { padding: 1px 8px; border-radius: 10px; background: var(--panel); color: var(--muted); font-size: 12px; }
+  .error { color: var(--danger); min-height: 1.45em; margin: 4px 0; }
+
+  /* Settings */
+  .form { display: grid; grid-template-columns: 170px 1fr; gap: 10px 14px; align-items: center; margin-top: 12px; }
+  .form .hint { grid-column: 2; margin-top: -6px; color: var(--muted); font-size: 12px; }
+  .form input[type=number] { width: 110px; }
+  .save { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  dl { display: grid; grid-template-columns: 170px 1fr; gap: 4px 14px; margin: 8px 0 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; -webkit-user-select: text; }
+</style>
+</head>
+<body>
+<header>
+  <nav role="tablist">
+    <button role="tab" data-tab="memories" aria-selected="true">Memories</button>
+    <button role="tab" data-tab="blocked" aria-selected="false">Blocked sites</button>
+    <button role="tab" data-tab="settings" aria-selected="false">Settings</button>
+  </nav>
+  <div id="state">
+    <span class="dot"></span><span id="state-text">…</span>
+    <button id="pause">Pause</button>
+  </div>
+</header>
+
+<main>
+  <section id="memories" class="active">
+    <div id="list-pane">
+      <input id="search" type="search" placeholder="Search memories" aria-label="Search memories">
+      <ul id="list" role="listbox" aria-label="Memories"></ul>
+      <div id="count"></div>
+    </div>
+    <div id="reader"></div>
+  </section>
+
+  <section id="blocked">
+    <div class="page"><div>
+      <h2>Blocked sites</h2>
+      <p class="muted">Pages on these sites are never recorded: no text, no window title, no address.
+        A site also covers its subdomains. Add a path, like <code>example.com/private</code>, to block
+        only part of a site.</p>
+      <form class="add" id="site-form">
+        <input id="site-input" type="text" placeholder="bank.com, or paste an address" aria-label="Site to block" autocomplete="off" spellcheck="false">
+        <button class="primary">Block site</button>
+      </form>
+      <div class="error" id="site-error" role="alert"></div>
+      <ul class="rows" id="sites"></ul>
+      <p class="muted" id="sites-empty">No sites blocked yet.</p>
+      <p class="muted">Blocking a site does not remove what was recorded from it before.
+        Private browsing windows are never recorded.</p>
+
+      <h2 style="margin-top:30px">Blocked apps</h2>
+      <p class="muted">Apps whose name contains one of these are never recorded.</p>
+      <form class="add" id="app-form">
+        <input id="app-input" type="text" placeholder="App name, for example Signal" aria-label="App to block" autocomplete="off" spellcheck="false">
+        <button class="primary">Block app</button>
+      </form>
+      <div class="error" id="app-error" role="alert"></div>
+      <ul class="rows" id="apps"></ul>
+      <h3>Always blocked</h3>
+      <div class="chips" id="builtin"></div>
+    </div></div>
+  </section>
+
+  <section id="settings">
+    <div class="page"><div>
+      <h2>Memories</h2>
+      <p class="muted">How work sessions are turned into memories by <code>deepmem distill</code>.
+        Changes are used from its next run.</p>
+      <form id="settings-form" novalidate>
+        <div class="form">
+          <label for="model">Model</label>
+          <input id="model" type="text" autocomplete="off" spellcheck="false">
+          <div class="hint">An Ollama model that is already pulled.</div>
+          <label for="ollama_url">Ollama address</label>
+          <input id="ollama_url" type="text" autocomplete="off" spellcheck="false">
+          <div class="hint">Must be on this computer. Recorded text never leaves it.</div>
+          <label for="num_ctx">Context size (tokens)</label>
+          <div><input id="num_ctx" type="number" min="1" step="1"></div>
+          <label for="session_gap_minutes">Session ends after</label>
+          <div><input id="session_gap_minutes" type="number" min="1" step="1"> minutes without activity</div>
+          <label for="session_max_minutes">Longest session</label>
+          <div><input id="session_max_minutes" type="number" min="1" step="1"> minutes</div>
+          <label for="distill_on_battery">On battery</label>
+          <label><input id="distill_on_battery" type="checkbox"> Run the model on battery while I am using the computer</label>
+        </div>
+        <div class="save">
+          <button class="primary">Save settings</button>
+          <span id="settings-note" role="status"></span>
+        </div>
+      </form>
+
+      <h2 style="margin-top:30px">Capture</h2>
+      <dl>
+        <dt>Screen text</dt><dd id="s-access"></dd>
+        <dt>Text captures</dt><dd id="s-frames"></dd>
+        <dt>Window changes</dt><dd id="s-events"></dd>
+        <dt>Last capture</dt><dd id="s-last"></dd>
+        <dt>Memory files</dt><dd id="s-dir"></dd>
+        <dt>Settings file</dt><dd id="s-config"></dd>
+      </dl>
+      <p class="muted" style="margin-top:14px">To delete recorded data for a period, run
+        <code>deepmem forget --last 1h</code> or <code>deepmem forget --all</code>.</p>
+    </div></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// All text from memories and settings is put on the page with textContent:
+// it is recorded screen data and must never be parsed as HTML.
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+};
+
+// --- bridge to the Rust side (api.rs) ---
+const waiting = new Map();
+let nextId = 1;
+function call(cmd, args = {}) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    waiting.set(id, { resolve, reject });
+    webkit.messageHandlers.deepmem.postMessage(JSON.stringify({ id, cmd, args }));
+  });
+}
+window.deepmemReply = (reply) => {
+  const request = waiting.get(reply.id);
+  waiting.delete(reply.id);
+  if (!request) return;
+  if ("error" in reply) request.reject(new Error(reply.error));
+  else request.resolve(reply.ok);
+};
+
+// --- tabs ---
+for (const tab of document.querySelectorAll("nav button")) {
+  tab.onclick = () => {
+    for (const other of document.querySelectorAll("nav button"))
+      other.setAttribute("aria-selected", other === tab);
+    for (const section of document.querySelectorAll("section"))
+      section.classList.toggle("active", section.id === tab.dataset.tab);
+  };
+}
+
+// --- capture state ---
+const number = new Intl.NumberFormat();
+const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const timeOnly = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+
+function showStatus(status) {
+  $("state").classList.toggle("paused", status.paused);
+  $("state-text").textContent = status.paused ? "Paused" : "Recording";
+  $("pause").textContent = status.paused ? "Resume" : "Pause";
+  $("s-access").textContent = status.accessibility
+    ? "On"
+    : "Off. Only app names are recorded. Allow this app under System Settings > Privacy & Security > Accessibility, then restart it.";
+  $("s-frames").textContent = number.format(status.frames);
+  $("s-events").textContent = number.format(status.events);
+  $("s-last").textContent = status.last_capture_ms ? dateTime.format(new Date(status.last_capture_ms)) : "Never";
+  $("s-dir").textContent = status.memories_dir;
+  $("s-config").textContent = status.config_file;
+}
+const refreshStatus = () => call("status").then(showStatus);
+$("pause").onclick = () => call("toggle_pause").then(showStatus);
+setInterval(() => { if (!document.hidden) refreshStatus(); }, 3000);
+
+// --- memories ---
+let selected = null; // file of the open memory
+
+function when(memory) {
+  const start = new Date(memory.start), end = new Date(memory.end);
+  if (!memory.start || isNaN(start)) return String(memory.file).replace(/^.*\//, ""); // hand-written file
+  return isNaN(end) ? dateTime.format(start) : `${dateTime.format(start)} – ${timeOnly.format(end)}`;
+}
+const appList = (apps) => (Array.isArray(apps) ? apps.join(", ") : "");
+
+async function loadMemories() {
+  const query = $("search").value.trim();
+  const memories = await call("memories_list", { query });
+  $("list").replaceChildren(...memories.map((memory) => {
+    const item = el("li", { role: "option", tabIndex: 0 },
+      el("div", { className: "when", textContent: when(memory) }),
+      el("div", { className: "apps", textContent: appList(memory.apps) }),
+      el("div", { className: "summary", textContent: memory.summary }));
+    item.dataset.file = memory.file;
+    item.setAttribute("aria-selected", memory.file === selected);
+    item.onclick = () => openMemory(memory.file);
+    item.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") openMemory(memory.file); };
+    return item;
+  }));
+  $("count").textContent = query
+    ? `${memories.length} matching`
+    : `${memories.length} ${memories.length === 1 ? "memory" : "memories"}`;
+  if (memories.some((memory) => memory.file === selected)) return;
+  selected = null;
+  if (memories.length) return openMemory(memories[0].file); // newest, or best match
+  showEmpty(query ? "No memory contains those words."
+    : "No memories yet. They appear here after deepmem distill has run.");
+}
+
+function showEmpty(message) {
+  $("reader").replaceChildren(el("div", { className: "empty", textContent: message }));
+  $("reader").style.display = "flex";
+}
+
+// Headings, lists and paragraphs only; everything else stays plain text.
+function renderMarkdown(body) {
+  const nodes = [];
+  let list = null;
+  for (const line of body.split("\n")) {
+    const text = line.trim();
+    const bullet = text.match(/^[-*]\s+(.*)$/);
+    if (bullet) {
+      if (!list) nodes.push(list = el("ul"));
+      list.append(el("li", { textContent: bullet[1] }));
+      continue;
+    }
+    list = null;
+    if (!text) continue;
+    const heading = text.match(/^#+\s+(.*)$/);
+    nodes.push(heading ? el("h3", { textContent: heading[1] }) : el("p", { textContent: text }));
+  }
+  return nodes;
+}
+
+async function openMemory(file) {
+  let memory;
+  try {
+    memory = await call("memory_get", { file });
+  } catch (error) {
+    if (selected === file) selected = null;
+    return loadMemories(); // deleted outside the window
+  }
+  selected = file;
+  for (const item of $("list").children) item.setAttribute("aria-selected", item.dataset.file === file);
+
+  const error = el("span", { className: "error", role: "alert" });
+  const remove = el("button", { className: "danger", textContent: "Delete…" });
+  const cancel = el("button", { textContent: "Cancel", hidden: true });
+  const reveal = el("button", { textContent: "Show in Finder" });
+  reveal.onclick = () => call("memory_reveal", { file }).catch((e) => { error.textContent = e.message; });
+  // First click asks, second click deletes.
+  remove.onclick = async () => {
+    if (cancel.hidden) {
+      remove.textContent = "Delete this memory";
+      cancel.hidden = false;
+      return;
+    }
+    try {
+      await call("memory_delete", { file });
+      selected = null;
+      await loadMemories();
+    } catch (e) {
+      error.textContent = e.message;
+    }
+  };
+  cancel.onclick = () => { remove.textContent = "Delete…"; cancel.hidden = true; };
+
+  $("reader").style.display = "block";
+  $("reader").replaceChildren(
+    el("h2", { textContent: when({ ...memory.front, file }) }),
+    el("div", { className: "muted", textContent: appList(memory.front.apps) }),
+    el("div", { className: "tools" }, reveal, remove, cancel, error),
+    el("article", {}, ...renderMarkdown(memory.body)));
+  $("reader").scrollTop = 0;
+}
+
+let searchTimer;
+$("search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadMemories, 150); };
+
+// --- blocked sites and apps, settings ---
+let settings = {};
+
+function showConfig(config) {
+  settings = config.settings;
+  const rows = (key, target) => $(target).replaceChildren(...settings[key].map((entry) => {
+    const remove = el("button", { className: "plain", textContent: "Remove" });
+    remove.setAttribute("aria-label", `Remove ${entry}`);
+    remove.onclick = () => save({ [key]: settings[key].filter((other) => other !== entry) });
+    return el("li", {}, el("span", { textContent: entry }), remove);
+  }));
+  rows("url_blocklist", "sites");
+  rows("denylist", "apps");
+  $("sites-empty").hidden = settings.url_blocklist.length > 0;
+  $("builtin").replaceChildren(...config.builtin_denylist.map((app) => el("span", { textContent: app })));
+  for (const key of ["model", "ollama_url", "num_ctx", "session_gap_minutes", "session_max_minutes"])
+    $(key).value = settings[key];
+  $("distill_on_battery").checked = settings.distill_on_battery;
+}
+const save = (changes) => call("config_set", changes).then(showConfig);
+
+function addForm(form, input, error, key) {
+  $(form).onsubmit = async (event) => {
+    event.preventDefault();
+    const entry = $(input).value.trim();
+    if (!entry) return;
+    try {
+      await save({ [key]: [...settings[key], entry] });
+      $(input).value = "";
+      $(error).textContent = "";
+    } catch (e) {
+      $(error).textContent = e.message;
+    }
+  };
+}
+addForm("site-form", "site-input", "site-error", "url_blocklist");
+addForm("app-form", "app-input", "app-error", "denylist");
+
+$("settings-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const note = $("settings-note");
+  const whole = (id) => { const n = Number($(id).value); return Number.isInteger(n) ? n : $(id).value; };
+  try {
+    await save({
+      model: $("model").value,
+      ollama_url: $("ollama_url").value,
+      num_ctx: whole("num_ctx"),
+      session_gap_minutes: whole("session_gap_minutes"),
+      session_max_minutes: whole("session_max_minutes"),
+      distill_on_battery: $("distill_on_battery").checked,
+    });
+    note.className = "muted";
+    note.textContent = "Saved.";
+    setTimeout(() => { if (note.textContent === "Saved.") note.textContent = ""; }, 2500);
+  } catch (e) {
+    note.className = "error";
+    note.textContent = e.message;
+  }
+};
+
+// --- start; also called by the Rust side each time the window is shown ---
+window.deepmemShown = () => {
+  refreshStatus();
+  const open = selected;
+  loadMemories().then(() => { if (open && open === selected) openMemory(open); });
+  call("config_get").then(showConfig).catch((e) => { $("site-error").textContent = e.message; });
+};
+deepmemShown();
+</script>
+</body>
+</html>
