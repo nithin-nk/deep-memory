@@ -54,12 +54,12 @@ Thinnest end-to-end path, proves the Rust/SQLite/Python/MCP contract.
 
 ## Slice 2: Screen text capture and keyword recall
 
-- [ ] Rust: on focus change, click, scroll stop, typing pause (debounced),
+- [x] Rust: on focus change, click, scroll stop, typing pause (debounced),
       and a 5-second idle fallback, walk the accessibility tree of the focused
       window and store its text in table `frames`. Skip a frame if its text
       hash equals the previous one.
-- [ ] Rust: store browser URL when the focused app is a browser.
-- [ ] Python: FTS5 index over `frames.text`; MCP tool
+- [x] Rust: store browser URL when the focused app is a browser.
+- [x] Python: FTS5 index over `frames.text`; MCP tool
       `recall(query, limit)` returns matching snippets with app, title, time.
 - **Done when:** read a web page, then `recall("<phrase from the page>")`
   returns it. A test covers the dedupe rule.
@@ -229,3 +229,35 @@ scores.)
   the same rows from the real database.
 - Still open: register the MCP server in Claude Code and ask "what was I
   just doing?" in a new session (the tool call itself is already verified).
+
+### Slice 2 (done)
+
+- Verified: daemon builds with no warnings; Rust dedupe test passes; 6 Python
+  tests pass (search, one result per window, incremental indexing, hostile
+  query input, missing tables). Daemon starts without permission and creates
+  both tables.
+- Verified on real windows with permission: frames stored for Google Chrome
+  (14.8 KB with URL), VS Code (Electron, with URL), Claude and Terminal.
+  "Done when" met: `recall("walking skeleton")` returned the GitHub page that
+  had been read, with URL and snippet; a nonsense query returned nothing.
+- Observed, to handle in Slice 3: the daemon captures its own Terminal
+  window, so its debug output creates a new frame every few seconds. The
+  first frame of a Chromium window is small and has no URL, because the app
+  builds its accessibility tree only after the first request.
+- Changes from plan:
+  - Triggers are inferred, not hooked. The daemon polls every 250 ms and uses
+    the system idle timer to detect "input paused". This avoids an event tap,
+    which would need the Input Monitoring permission. It cannot tell click,
+    scroll and typing apart; all three mean "capture after 0.7 s of quiet".
+  - URL comes from the `AXURL` of the first web area in the window, so it
+    works for any browser and also for Electron apps, with no browser list.
+  - The FTS index stores its own copy of the text (roughly doubles text
+    storage) so Slice 3 can index redacted text.
+  - Password fields are skipped already, ahead of Slice 3.
+- Caps per frame: 5,000 nodes, depth 40, 50 KB text, 1.5 s. Long documents
+  are truncated.
+- The daemon sets `AXManualAccessibility` and `AXEnhancedUserInterface` on
+  the focused app. Known risk: the second can slow window animations when a
+  third-party window manager moves the app.
+- Sessions in the Claude desktop app cannot edit the main checkout; work
+  happens in the session worktree and is merged to `main` afterwards.
