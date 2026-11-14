@@ -1,6 +1,7 @@
 """`deepmem`: control what deep-memory records and keeps."""
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import time
 
 from pathlib import Path
 
-from deepmem import consolidate, distill, evaluate, store, vision
+from deepmem import consolidate, context, distill, evaluate, install, store, vision
 
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -44,7 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     distill_cmd = commands.add_parser("distill", help="turn captured sessions into memories with the local model")
     distill_cmd.add_argument("--force", action="store_true", help="run even on battery while you are active")
     distill_cmd.add_argument("--watch", action="store_true", help="keep running, one pass every 5 minutes")
+    distill_cmd.add_argument("--scheduled", action="store_true", help="one pass that also consolidates once a day (used by the launchd agent)")
     commands.add_parser("consolidate", help="merge episodes into facts.md and preferences.md, then delete old captures and episodes")
+    context_cmd = commands.add_parser("context", help="print a digest of the current project's memories (run by the Claude Code hook)")
+    context_cmd.add_argument("--dir", type=Path, help="project directory (default: the current one)")
+    commands.add_parser("install", help="start deep-memory at login and add the Claude Code hook")
+    uninstall = commands.add_parser("uninstall", help="remove what `deepmem install` set up")
+    data = uninstall.add_mutually_exclusive_group()
+    data.add_argument("--keep-data", action="store_true", help="keep recorded data and memories without asking")
+    data.add_argument("--delete-data", action="store_true", help="delete recorded data and memories without asking")
     export = commands.add_parser("export-fixture", help="freeze captured frames into a file for `deepmem eval`")
     export.add_argument("--last", type=parse_duration, metavar="DURATION", help="only the last 30m, 1h, 2d, ... (default: all)")
     export.add_argument("--out", type=Path, default=evaluate.FIXTURE, help=f"default: {evaluate.FIXTURE}")
@@ -75,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"screenshots:  {info['screenshots_waiting']} waiting for `deepmem distill`")
         print(f"last capture: {info['last_capture'] or 'never'}")
         print(f"database:     {store.DB}")
+        for warning in install.protection(store.HOME):
+            print(f"warning:      {warning}")
     elif args.command == "forget":
         what = "ALL captured data" if args.all else "captured data from the selected period"
         if not args.yes:
@@ -95,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"Described {described} screenshot(s).")
                     count = distill.run_once(config=config)
                     print(f"Wrote {count} episode(s) to {store.DB.parent / 'memories'}.")
-                    if args.watch and consolidate.due():  # once a day, under the same power/idle rule
+                    if (args.watch or args.scheduled) and consolidate.due():  # once a day, under the same power/idle rule
                         _consolidate(config)
                 except distill.ModelUnavailable as err:
                     print(f"deepmem: {err}", file=sys.stderr)
@@ -110,6 +121,27 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _consolidate(store.load_config())
         except distill.ModelUnavailable as err:
+            print(f"deepmem: {err}", file=sys.stderr)
+            return 1
+    elif args.command == "context":
+        # Claude Code runs hooks in the project directory and names it in the environment.
+        digest = context.summary(args.dir or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+        if digest:
+            print(digest)
+    elif args.command in ("install", "uninstall"):
+        try:
+            if args.command == "install":
+                package = Path(__file__).resolve().parents[2]  # memory/, when run from a checkout
+                if not (package / "pyproject.toml").exists():
+                    raise install.InstallError("run install from the repository: uv run --directory <repository>/memory deepmem install")
+                install.install(package.parent / "capture" / "target" / "release" / "deepmem-capture", package)
+            else:
+                delete = args.delete_data
+                if not delete and not args.keep_data:
+                    answer = input(f"Also delete all recorded data and memories in {store.HOME}? This cannot be undone. [y/N] ")
+                    delete = answer.strip().lower() == "y"
+                install.uninstall(delete)
+        except install.InstallError as err:
             print(f"deepmem: {err}", file=sys.stderr)
             return 1
     elif args.command == "export-fixture":

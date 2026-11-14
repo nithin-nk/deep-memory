@@ -4,7 +4,7 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 8 of [tasks/todo.md](tasks/todo.md), plus the desktop window.
+Status: Slices 1-8 and 10 of [tasks/todo.md](tasks/todo.md) (9 skipped), plus the desktop window.
 Records the focused window's text (from a screenshot when the window exposes
 none), distills work sessions into per-project Markdown memories with a local
 model, and lets each agent search only its own project. A window in the menu
@@ -17,6 +17,46 @@ bar app shows the memories and the settings. macOS only.
 - [uv](https://docs.astral.sh/uv/) (for the Python side)
 - [Ollama](https://ollama.com) with a model pulled, default `qwen3-vl:8b`
   (for distillation; capture and search work without it)
+
+## Install
+
+To have deep-memory start at login instead of running it by hand (see Run
+below for that):
+
+```bash
+cd capture && cargo build --release
+```
+
+```bash
+uv run --directory /absolute/path/to/deep-memory/memory deepmem install
+```
+
+Quit a daemon you started by hand first. Install then:
+
+- copies the daemon to `~/Applications/DeepMemory.app` and starts it now and
+  at every login (launchd agent `com.deepmem.capture`);
+- installs the `deepmem` command with `uv tool install` and runs
+  `deepmem distill --scheduled` every 5 minutes (`com.deepmem.distill`):
+  screenshots, episodes, and once a day consolidation and retention, under
+  the usual power rule. Logs are in `~/.deepmem/logs/`;
+- adds a `SessionStart` hook to `~/.claude/settings.json`, so every Claude
+  Code session in a repository starts with a digest of that project's
+  memories (`deepmem context`: preferences, facts, the last three sessions;
+  at most 1,500 characters; never another project or `personal`);
+- prints what is left for you: grant Accessibility and Screen Recording to
+  DeepMemory, and register the search tools with `claude mcp add`.
+
+The app is signed with a certificate made on your machine and kept in
+`~/.deepmem/signing/`, so the two permissions survive an update. Run
+`deepmem install` again after rebuilding to update.
+
+`deepmem uninstall` removes the app, the agents, the hook and the command,
+and asks whether to delete `~/.deepmem` (`--keep-data` / `--delete-data`
+answer in advance).
+
+Data at rest is not encrypted by deep-memory itself. It relies on FileVault
+and on `~/.deepmem` being closed to other users; `deepmem install` closes the
+directory and `deepmem status` warns when either is not the case.
 
 ## Run
 

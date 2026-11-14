@@ -191,6 +191,8 @@ Without this, later slices cannot show they improve anything.
 
 ## Slice 9: Structured sources
 
+Skipped by the user on 2026-11-14; Slice 10 was done first.
+
 - [ ] Ingest git activity (commits, branch switches) for repositories the
       user has been seen working in.
 - [ ] Ingest shell history (zsh) with timestamps, through the same redaction
@@ -201,14 +203,15 @@ Without this, later slices cannot show they improve anything.
 
 ## Slice 10: Agent integration and install
 
-- [ ] Claude Code session-start hook that injects a short
+- [x] Claude Code session-start hook that injects a short
       `current_context()` summary for the current project, so memory is used
       without the agent deciding to ask.
-- [ ] `deepmem install`: launchd agents for the daemon and the distiller,
+- [x] `deepmem install`: launchd agents for the daemon and the distiller,
       MCP registration snippet, permission checklist. `deepmem uninstall`
       removes everything, with an option to keep or delete data.
-- [ ] Encryption at rest for the database and memory directory, key in the
-      macOS Keychain.
+- [x] Encryption at rest: replaced by a check (user decision, see review).
+      No encryption by deep-memory; install and status check FileVault and
+      the directory mode.
 - **Done when:** on a clean user account, `deepmem install` plus the
   permission grants gives a working system after reboot.
 
@@ -667,3 +670,57 @@ scores.)
     There is no eval for consolidation yet; `deepmem eval` measures
     episodes and recall only.
   - `Desktop` and `personal` get durable files like any project.
+
+### Slice 10 (done in code; not yet installed on a real account)
+
+- User decisions (2026-11-14): skip Slice 9; no encryption by deep-memory
+  (option A: rely on FileVault, close the directory, warn); `install` may
+  edit `~/.claude/settings.json`; a self-signed certificate is fine.
+- Verified: 60 Python tests pass (10 new, `tests/test_install.py`), with a
+  fake command runner and a temporary home, so no test touches launchd, the
+  keychain or the real settings file. Covered: the digest holds only the
+  caller's project (not another project, not `personal`), drops sources and
+  pin markers, redacts, stays under 1,500 characters; the hook is added
+  once and removed without touching other settings or hooks, and a broken
+  settings file is refused untouched; app bundle, both launchd files, order
+  of stop / sign / start; install refuses when a hand-started daemon runs,
+  the daemon is not built or `uv` is missing, before changing anything;
+  ad hoc signing with a warning when no certificate can be made; uninstall
+  twice, keeping or deleting data; the FileVault and directory warnings;
+  `distill --scheduled` runs the daily job when due.
+- Verified with the real tools in a temporary home: the app was built and
+  signed twice; `codesign --verify --strict` passes and the designated
+  requirement is the same both times (`identifier "com.deepmem.capture"
+  and certificate leaf = H"..."`), which is what macOS ties the permission
+  grants to. The keychain is a file of its own and never enters the search
+  list. `plutil -lint` accepts both launchd files. `deepmem context` on
+  the live memories of this repository gives a 1,440-character digest.
+- Not verified, all need the user: a real `deepmem install` (launchd
+  loading the agents, `uv tool install`, the real settings file); that the
+  grants really survive a rebuild; a Claude Code session showing the digest
+  (the hook format is written from the documentation as remembered, not
+  tried); the "Done when" check on a clean account after a reboot.
+- Changes from plan:
+  - Encryption at rest is not built (decision above). FileVault already
+    encrypts the disk; a key in the Keychain would only stop other programs
+    of the same user if tied to a properly signed binary, and encrypted
+    Markdown could not be edited.
+  - The daemon is wrapped in `~/Applications/DeepMemory.app` and signed, so
+    that launchd can start it with its own permission grants. Until now it
+    inherited the terminal's.
+  - The certificate's keychain and its password lie in
+    `~/.deepmem/signing/`. Any program running as the user could sign as
+    deep-memory and inherit its grants. The alternative is the login
+    keychain with a prompt at each install.
+  - launchd runs single passes (`distill --scheduled`) every 5 minutes; the
+    `--watch` loop stays for running by hand.
+  - The capture agent restarts after a crash but not after Quit in the menu
+    bar; it starts again at the next login.
+  - MCP registration is printed as a command, not run.
+  - The digest never includes `personal`, also with `share_personal`.
+- Known limits:
+  - Install must be run from a checkout with the daemon built; there is no
+    packaged release.
+  - The hook is installed for Claude Code only.
+  - `uninstall --keep-data` keeps the signing keychain, so a later install
+    keeps the grants.
