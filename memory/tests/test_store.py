@@ -1,6 +1,6 @@
 import sqlite3
 
-from deepmem.server import recent_events
+from deepmem.store import recent_events
 
 # Same schema deepmem-capture creates (capture/src/main.rs).
 SCHEMA = "CREATE TABLE events (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, app TEXT NOT NULL, title TEXT NOT NULL)"
@@ -35,7 +35,7 @@ def test_missing_database_or_table_returns_empty(tmp_path):
 
 # --- recall ---------------------------------------------------------------
 
-from deepmem.server import search  # noqa: E402
+from deepmem.store import search  # noqa: E402
 
 FRAMES = "CREATE TABLE frames (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, app TEXT NOT NULL, title TEXT NOT NULL, url TEXT, text TEXT NOT NULL)"
 

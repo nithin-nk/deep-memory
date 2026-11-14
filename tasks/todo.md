@@ -19,8 +19,10 @@ user configures it.
 - **Layout:** `capture/` is a Rust crate (binary `deepmem-capture`).
   `memory/` is a Python package managed with `uv` (CLI `deepmem`).
 - **Contract between Rust and Python:** one SQLite file,
-  `~/.deepmem/db.sqlite`, WAL mode. Rust only writes raw tables. Python reads
-  raw tables and owns everything else. No IPC, no HTTP between them.
+  `~/.deepmem/db.sqlite`, WAL mode. Rust is the only inserter into raw tables.
+  Python reads raw tables, owns everything else, and deletes raw rows only
+  for `deepmem forget` and retention. No IPC, no HTTP between them. Pause
+  state is a flag file, `~/.deepmem/paused`, that both sides honour.
 - **Memories are Markdown files** under `~/.deepmem/memories/<project>/`.
   The files are the source of truth; SQLite FTS5 is only an index over them.
 - **Config:** one file, `~/.deepmem/config.toml`.
@@ -69,13 +71,13 @@ Thinnest end-to-end path, proves the Rust/SQLite/Python/MCP contract.
 
 User control is a product promise, so it lands before any model sees data.
 
-- [ ] Rust: global shortcut toggles pause/resume; menu bar or notification
+- [x] Rust: global shortcut toggles pause/resume; menu bar or notification
       shows state. Paused means zero rows written.
-- [ ] Rust: app denylist in config (password managers by default), skip
+- [x] Rust: app denylist in config (password managers by default), skip
       private/incognito browser windows, skip secure text fields.
-- [ ] Python: redaction pass for secrets (API keys, tokens, private keys,
+- [x] Python: redaction pass for secrets (API keys, tokens, private keys,
       card-number patterns) applied before text is indexed or sent to a model.
-- [ ] CLI: `deepmem pause`, `deepmem resume`, `deepmem status`,
+- [x] CLI: `deepmem pause`, `deepmem resume`, `deepmem status`,
       `deepmem forget --last 1h`, `deepmem forget --all`.
 - **Done when:** tests prove a fake API key never reaches `frames` FTS, a
   denylisted app produces no rows, and `forget --last 1h` removes rows and
@@ -261,3 +263,33 @@ scores.)
   third-party window manager moves the app.
 - Sessions in the Claude desktop app cannot edit the main checkout; work
   happens in the session worktree and is merged to `main` afterwards.
+
+### Slice 3 (done; private-window detection unconfirmed in real browsers)
+
+- Verified by tests: 2 Rust (dedupe; denylist and private-window rules),
+  11 Python. Fake secrets of ten kinds never appear in the index, in `recall`
+  results or in `current_context`. `forget --last 1h` removes raw rows and
+  index entries, and the deleted text is no longer present in the database
+  file bytes. CLI pause/resume/forget confirmation covered.
+- Verified by running the daemon in a temporary home (no Accessibility
+  permission): shortcut registration succeeds; `deepmem pause` stops rows,
+  `deepmem resume` restarts them; a denylisted frontmost app produces no
+  rows; a broken `config.toml` exits with code 1.
+- Confirmed by the user: Ctrl+Option+Cmd+P pauses and resumes capture.
+- Not verified: private-window detection in real browsers.
+  Safari's private-window title marker is an assumption.
+- Changes from plan:
+  - Pause state is a flag file, so the shortcut and CLI share one source of
+    truth and a pause survives restarts.
+  - Shortcut is fixed (Ctrl+Option+Cmd+P), registered through Carbon hot
+    keys, which need no permission. Not configurable yet.
+  - State is shown by a notification sent through `osascript`, not a menu
+    bar item.
+  - `forget` drops and rebuilds the search index instead of deleting single
+    entries, and asks for confirmation unless `--yes`.
+  - Python code moved to `store.py`; `server.py` only declares MCP tools.
+  - The daemon skips its own terminal window (title contains
+    `deepmem-capture`).
+- Open gap: redaction happens at indexing, so `frames.text` on disk is
+  still raw. Options: redact in the daemon before insert (needs the rules in
+  Rust), or shorten raw retention in Slice 8. Decide before Slice 4.

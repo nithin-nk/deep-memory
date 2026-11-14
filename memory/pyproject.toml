@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = ["mcp>=2"]
 
 [project.scripts]
+deepmem = "deepmem.cli:main"
 deepmem-mcp = "deepmem.server:main"
 
 [dependency-groups]

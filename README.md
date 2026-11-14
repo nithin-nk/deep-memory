@@ -4,13 +4,9 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 2 of [tasks/todo.md](tasks/todo.md). Records app and window
+Status: Slice 3 of [tasks/todo.md](tasks/todo.md). Records app and window
 focus changes plus the text of the focused window; agents can ask what you
 were just doing and search what you have seen. macOS only.
-
-**Privacy note:** capture has no pause switch, app denylist or secret
-redaction yet (Slice 3). Everything visible in the focused window is stored
-in plain text in `~/.deepmem/db.sqlite`. Password fields are skipped.
 
 ## Requirements
 
@@ -52,6 +48,33 @@ accessibility tree when focus changes, when keyboard or mouse input pauses for
 0.7 s, and at least every 5 s while you are active. A frame is stored only if
 its text differs from the previous one. Chromium and Electron apps are asked to
 enable their accessibility tree, otherwise they expose no page content.
+
+## Privacy controls
+
+- **Pause:** press Ctrl+Option+Cmd+P, or run `deepmem pause` / `deepmem
+  resume`. A notification confirms the change. While paused nothing is
+  recorded, and a pause survives a daemon restart.
+- **Never recorded:** password fields, private browsing windows (recognised
+  by the marker in the window title), and password managers. Add your own
+  apps in `~/.deepmem/config.toml`, then restart the daemon:
+
+  ```toml
+  denylist = ["Signal", "Messages"]
+  ```
+
+- **Secrets:** API keys, tokens, private keys, passwords in `name = value`
+  form and card numbers are replaced with `[REDACTED:kind]` before text is
+  indexed or returned to an agent.
+- **Forget:** `deepmem forget --last 1h` or `deepmem forget --all` deletes
+  captured data and overwrites it in the database file.
+- **Status:** `deepmem status`.
+
+Run the CLI with `uv run --directory /absolute/path/to/deep-memory/memory deepmem <command>`.
+
+Known limits: the raw `frames` table still holds unredacted text until it is
+forgotten (redaction happens at indexing); secret detection is pattern based,
+so an unlabelled random string is not caught; the database is not encrypted
+yet (Slice 10).
 
 ## Test
 
