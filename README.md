@@ -4,7 +4,7 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 7 of [tasks/todo.md](tasks/todo.md), plus the desktop window.
+Status: Slice 8 of [tasks/todo.md](tasks/todo.md), plus the desktop window.
 Records the focused window's text (from a screenshot when the window exposes
 none), distills work sessions into per-project Markdown memories with a local
 model, and lets each agent search only its own project. A window in the menu
@@ -146,6 +146,8 @@ last confirmed:
   sources is kept until an episode contradicts it. Lines that are not
   bullets (headings, prose) are never touched.
 - `recall` finds these files like episodes, within the same project.
+- The window lists them above the episodes, as "Facts · project" and
+  "Preferences · project".
 - `deepmem distill --watch` runs the same job once a day, under the same
   power rule as distillation. `deepmem consolidate` itself runs at once.
 - An unusable model reply is retried once. After that the files stay

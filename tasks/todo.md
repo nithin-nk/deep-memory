@@ -608,6 +608,14 @@ scores.)
   first run after 7 days deletes distilled frames); many days of episodes against a grown facts file; `remove`
   and `confirm` from the real model; the watch loop over a real day. Rust
   tests were not rerun (no Rust change).
+- Follow-up after user feedback ("cannot see facts and preferences in the
+  UI"): the branch did not contain the desktop window; `main` was merged
+  in. In the window the two files sorted below every episode, titled only
+  `facts.md`. They are now listed first as "Facts · project" and
+  "Preferences · project" with their entry count. Verified: 15 Rust tests
+  (1 new) and 50 Python tests pass after the merge; the page was checked in
+  a browser with the real files through a stubbed bridge. Not verified: the
+  real window (the user's running daemon is an older build).
 - Decisions made by the agent; the user approved the design without
   answering these three questions:
   - Operations instead of a full rewrite. The plan said the model returns

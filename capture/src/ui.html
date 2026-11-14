@@ -266,6 +266,11 @@ setInterval(() => { if (!document.hidden) refreshStatus(); }, 3000);
 let selected = null; // file of the open memory
 
 function when(memory) {
+  // facts.md and preferences.md hold what stays true: no time range, named by project.
+  if (memory.type === "facts" || memory.type === "preferences") {
+    const project = String(memory.file).split("/")[0];
+    return `${memory.type === "facts" ? "Facts" : "Preferences"} · ${project}`;
+  }
   const start = new Date(memory.start), end = new Date(memory.end);
   if (!memory.start || isNaN(start)) return String(memory.file).replace(/^.*\//, ""); // hand-written file
   return isNaN(end) ? dateTime.format(start) : `${dateTime.format(start)} – ${timeOnly.format(end)}`;

@@ -114,7 +114,14 @@ fn markdown_files(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// Newest first. With a query, only memories that contain every word of it.
+/// `facts.md` and `preferences.md` (written by `deepmem consolidate`) hold what
+/// stays true; they have no time range.
+fn is_durable(kind: &Value) -> bool {
+    matches!(kind.as_str(), Some("facts" | "preferences"))
+}
+
+/// Durable files first, then episodes, newest first. With a query, only
+/// memories that contain every word of it.
 // ponytail: reads every file on each call and matches substrings. The Python
 // side owns the FTS index; query it instead if thousands of files make this slow.
 fn memories_list(ctx: &Context, query: &str) -> Value {
@@ -130,18 +137,27 @@ fn memories_list(ctx: &Context, query: &str) -> Value {
         if !words.iter().all(|word| haystack.contains(word)) {
             continue;
         }
-        let summary = body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or("");
+        let summary = if is_durable(&front["type"]) {
+            let count = body.lines().filter(|l| l.starts_with("- ") || l.starts_with("* ")).count();
+            format!("{count} {}", if count == 1 { "entry" } else { "entries" })
+        } else {
+            body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or("").to_string()
+        };
         items.push(json!({
             "file": path.strip_prefix(&root).unwrap_or(&path),
+            "type": front["type"],
             "start": front["start"],
             "end": front["end"],
             "apps": front["apps"],
             "summary": summary.chars().take(240).collect::<String>(),
         }));
     }
-    // ISO timestamps sort as text; files without one go last, by name.
+    // ISO timestamps sort as text; other files without one go last, by name.
     let key = |item: &Value| (item["start"].as_str().unwrap_or("").to_string(), item["file"].to_string());
-    items.sort_by(|a, b| key(b).cmp(&key(a)));
+    items.sort_by(|a, b| {
+        let durable = |item: &Value| is_durable(&item["type"]);
+        durable(b).cmp(&durable(a)).then_with(|| if durable(a) { key(a).cmp(&key(b)) } else { key(b).cmp(&key(a)) })
+    });
     items.into()
 }
 
@@ -198,6 +214,15 @@ mod tests {
         Context { db_path: home.join("db.sqlite"), home, trusted: false }
     }
 
+    /// Adds what `deepmem consolidate` writes for a project.
+    fn add_durable(ctx: &Context) {
+        let dir = ctx.home.join("memories/alpha");
+        fs::create_dir_all(&dir).unwrap();
+        let fact = "- The store is SQLite. (sources: 2026-11-14T101005; confirmed: 2026-11-14)\n";
+        fs::write(dir.join("facts.md"), format!("---\ntype: \"facts\"\nproject: \"alpha\"\n---\n\n{fact}- By hand\n")).unwrap();
+        fs::write(dir.join("preferences.md"), "---\ntype: \"preferences\"\n---\n\n- Uses uv (pinned)\n").unwrap();
+    }
+
     fn call(ctx: &Context, cmd: &str, args: Value) -> Value {
         let reply = handle(&json!({ "id": 7, "cmd": cmd, "args": args }).to_string(), ctx);
         let reply: Value = serde_json::from_str(&reply).unwrap();
@@ -223,6 +248,20 @@ mod tests {
         let one = call(&ctx, "memory_get", json!({ "file": "_unsorted/a.md" }));
         assert_eq!(one["ok"]["front"]["start"], "2026-11-14T09:38:44+05:30");
         assert!(one["ok"]["body"].as_str().unwrap().starts_with("The user set up"));
+    }
+
+    #[test]
+    fn durable_files_are_listed_first_with_their_kind() {
+        let ctx = context("durable");
+        add_durable(&ctx);
+        let all = call(&ctx, "memories_list", json!({}));
+        let all = all["ok"].as_array().unwrap();
+        let files: Vec<&str> = all.iter().map(|m| m["file"].as_str().unwrap()).collect();
+        assert_eq!(files, ["alpha/facts.md", "alpha/preferences.md", "_unsorted/a.md", "_unsorted/b.md"]);
+        assert_eq!((&all[0]["type"], &all[0]["summary"]), (&json!("facts"), &json!("2 entries")));
+        assert_eq!((&all[1]["type"], &all[1]["summary"]), (&json!("preferences"), &json!("1 entry")));
+        let found = call(&ctx, "memories_list", json!({ "query": "sqlite" }));
+        assert_eq!(found["ok"][0]["file"], "alpha/facts.md");
     }
 
     #[test]
