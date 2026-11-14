@@ -529,10 +529,16 @@ scores.)
   many of them activities ("The user ran distillation on the first 15
   minutes") and 9 about personal browsing habits. The prompt now lists what
   is not an entry and tells the model that `personal` has no project facts.
-- Not verified: the live `~/.deepmem/memories` (no durable files were
-  written there; run `deepmem consolidate` to create them); retention on
-  the live database (the first daily run deletes distilled frames older
-  than 7 days); many days of episodes against a grown facts file; `remove`
+- Verified on the live data (asked for by the user after the review):
+  `deepmem consolidate` took 11 s and wrote the same 12 entries to
+  `~/.deepmem/memories`; retention deleted nothing (all captures are from
+  the same day); `recall("AppKit RunCurrentEventLoop")` scoped to
+  `deep-memory` returns the source episode first and `facts.md` second,
+  scoped to `personal` nothing. `recall("pause shortcut")` does not find
+  the fact, which says "pausing": keyword search has no stemming, and
+  durable files do not rank above episodes.
+- Not verified: retention deleting anything on the live database (the
+  first run after 7 days deletes distilled frames); many days of episodes against a grown facts file; `remove`
   and `confirm` from the real model; the watch loop over a real day. Rust
   tests were not rerun (no Rust change).
 - Decisions made by the agent; the user approved the design without
