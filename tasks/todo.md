@@ -701,9 +701,20 @@ scores.)
   `~/.local/bin`, the settings file gained exactly one hook entry next to
   an existing one, `~/.deepmem` is mode 0700, and the capture log shows
   the daemon waiting for its two permissions.
-- Not verified, all need the user: the two permission grants for
-  DeepMemory and that they survive a rebuild; a scheduled distill pass in
-  the log; a Claude Code session showing the digest
+- Verified after the user granted Accessibility and Screen Recording to
+  DeepMemory: window text is recorded and the Screen Recording warning is
+  gone. The daemon was then rebuilt and installed again: same certificate,
+  no permission warning, text still recorded, so the grants survive an
+  update. A scheduled pass ran and skipped itself ("On battery and in
+  use").
+- Found on the real machine: macOS opened a second copy of the app when
+  the permission changed, next to the one launchd runs. Added a lock
+  (`~/.deepmem/daemon.lock`): a second daemon for the same data directory
+  quits at once with exit code 0. 16 Rust tests (1 new); tried with two
+  daemons in a temporary home and by opening the installed app while it
+  runs: one process stays.
+- Not verified: a scheduled pass that writes episodes; a screenshot taken
+  by the installed app; a Claude Code session showing the digest
   (the hook format is written from the documentation as remembered, not
   tried); the "Done when" check on a clean account after a reboot.
 - Changes from plan:

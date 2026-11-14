@@ -678,7 +678,22 @@ fn modified(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
+/// Holds `daemon.lock` in the data directory for as long as the returned file
+/// lives. None if another daemon holds it: two would record everything twice.
+fn single_instance(home: &Path) -> Option<fs::File> {
+    let file = fs::File::create(home.join("daemon.lock")).expect("cannot create daemon.lock");
+    file.try_lock().ok().map(|_| file)
+}
+
 fn main() -> rusqlite::Result<()> {
+    let home = home_dir();
+    fs::create_dir_all(&home).expect("cannot create deep-memory directory");
+    // Before the menu bar item exists, so a second copy never shows an icon.
+    // It exits with success: launchd must not start it again.
+    let Some(_instance) = single_instance(&home) else {
+        eprintln!("deepmem-capture: already running; this copy quits.");
+        return Ok(());
+    };
     let trusted = unsafe { AXIsProcessTrusted() };
     if !trusted {
         eprintln!(
@@ -696,8 +711,6 @@ fn main() -> rusqlite::Result<()> {
     let menu_bar = MenuBar::new(mtm);
     window::install_edit_menu(mtm, &ns_app);
 
-    let home = home_dir();
-    fs::create_dir_all(&home).expect("cannot create deep-memory directory");
     // A config file that cannot be parsed stops the daemon: privacy settings
     // must not be ignored silently.
     let config_file = home.join("config.toml");
@@ -948,6 +961,16 @@ fn main() -> rusqlite::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_one_daemon_runs_per_data_directory() {
+        let home = std::env::temp_dir().join(format!("deepmem-test-{}-lock", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let first = super::single_instance(&home);
+        assert!(first.is_some() && super::single_instance(&home).is_none());
+        drop(first); // the first daemon quits: the next one may start
+        assert!(super::single_instance(&home).is_some());
+    }
+
     use super::*;
 
     #[test]
