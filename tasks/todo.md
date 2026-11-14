@@ -695,9 +695,15 @@ scores.)
   grants to. The keychain is a file of its own and never enters the search
   list. `plutil -lint` accepts both launchd files. `deepmem context` on
   the live memories of this repository gives a 1,440-character digest.
-- Not verified, all need the user: a real `deepmem install` (launchd
-  loading the agents, `uv tool install`, the real settings file); that the
-  grants really survive a rebuild; a Claude Code session showing the digest
+- Verified by a real install on the development machine (2026-11-14):
+  both agents are loaded, the daemon runs from
+  `~/Applications/DeepMemory.app` with a valid signature, `deepmem` is in
+  `~/.local/bin`, the settings file gained exactly one hook entry next to
+  an existing one, `~/.deepmem` is mode 0700, and the capture log shows
+  the daemon waiting for its two permissions.
+- Not verified, all need the user: the two permission grants for
+  DeepMemory and that they survive a rebuild; a scheduled distill pass in
+  the log; a Claude Code session showing the digest
   (the hook format is written from the documentation as remembered, not
   tried); the "Done when" check on a clean account after a reboot.
 - Changes from plan:
