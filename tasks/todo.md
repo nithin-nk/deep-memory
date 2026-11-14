@@ -110,13 +110,14 @@ The core of the product.
 
 Without this, later slices cannot show they improve anything.
 
-- [ ] `deepmem export-fixture`: save a redacted slice of raw data as a
+- [x] `deepmem export-fixture`: save a redacted slice of raw data as a
       fixture.
-- [ ] Eval file format: question, expected facts, project.
-- [ ] `deepmem eval`: run distillation plus `recall` over fixtures, score
+- [x] Eval file format: question, expected facts, project.
+- [x] `deepmem eval`: run distillation plus `recall` over fixtures, score
       whether expected facts appear, print a table. Model name is a
       parameter, so models can be compared.
 - [ ] Seed with at least 15 questions written by the user from real work.
+      (8 seed cases written by the agent from the 2026-11-14 session.)
 - **Human:** write the seed questions.
 - **Done when:** `deepmem eval --model <a>` and `--model <b>` print
   comparable scores.
@@ -362,3 +363,30 @@ scores.)
   - Personal browsing becomes a memory like anything else. Slice 6 must keep
     it out of project-scoped recall.
 - The thinking build `qwen3-vl:8b` is still on disk, unused (6.2 GB).
+
+### Slice 5 (harness done; second-model comparison and user cases pending)
+
+- Verified: 24 Python tests pass (4 new). On a real fixture (906 frames, 4
+  sessions) with `qwen3-vl:8b-instruct`: 5 episodes, 1 dropped reply,
+  120.6 s (30.1 s per session); 4/8 cases answered from memories, 6/8
+  including raw screen text, 5/8 facts kept in any memory, 0/34 entities
+  absent from the captures.
+- Findings: distillation loses facts that raw screen search still finds, so
+  raw text must stay searchable. The single-prompt packing below removed
+  fragmentation but dropped at least one detail (the model name) that the
+  multi-part version had kept.
+- Folded in from Slice 4 feedback:
+  - One prompt per session: small windows keep all text, large ones share
+    the remaining budget.
+  - Empty runs report "1 session still open, closes by HH:MM".
+- Added beyond the plan: entity check (identifier-like tokens of each named
+  entity must occur in the source captures). Substring-based; it cannot
+  catch a wrong claim about a real entity.
+- Case format is TOML with `query` (keywords for recall) and `expect`
+  (strings that must all appear), because recall is keyword search and
+  cannot take a natural-language question.
+- `deepmem forget` deletes the fixture file.
+- User decision (2026-11-14): Gmail may be captured and indexed; no default
+  mail denylist.
+- Open: "Done when" asks for two models with comparable scores; a second
+  run was in progress at commit time. The user still owes about 15 cases.

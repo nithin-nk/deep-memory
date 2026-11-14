@@ -271,6 +271,11 @@ def forget(seconds: float | None, db: Path = DB) -> int:
             if expired:
                 file.unlink()
                 deleted += 1
+        # An eval fixture is a frozen copy of captures and may cover the period.
+        fixture = HOME / "eval" / "fixture.jsonl"
+        if db == DB and fixture.exists():
+            fixture.unlink()
+            deleted += 1
         # Row ids restart after a full delete; keep the distiller's cursor valid.
         try:
             newest = con.execute("SELECT coalesce(max(id), 0) FROM frames").fetchone()[0]

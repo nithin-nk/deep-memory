@@ -4,9 +4,10 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 4 of [tasks/todo.md](tasks/todo.md). Records the focused
+Status: Slice 5 of [tasks/todo.md](tasks/todo.md). Records the focused
 window's text, distills work sessions into Markdown memories with a local
-model, and lets agents search both. macOS only.
+model, lets agents search both, and can score itself on frozen input. macOS
+only.
 
 ## Requirements
 
@@ -62,6 +63,7 @@ uv run --directory /absolute/path/to/deep-memory/memory deepmem distill
 ```
 
 - A session ends after 5 minutes without captures, or after 30 minutes.
+  A run that finds only an open session says when it will close.
 - Episodes are plain files in `~/.deepmem/memories/`. Edit or delete them
   freely; the search index follows the files.
 - `recall` returns matching memories first, then raw screen text.
@@ -80,6 +82,27 @@ session_gap_minutes = 5
 session_max_minutes = 30
 distill_on_battery = false
 ```
+
+## Evaluation
+
+Compare models, prompts and settings on the same input.
+
+```bash
+deepmem export-fixture            # freeze captured frames (add --last 2h to limit)
+cp eval/cases.example.toml ~/.deepmem/eval/cases.toml   # then write your own cases
+deepmem eval                      # configured model
+deepmem eval --model qwen3-vl:4b  # any other pulled model
+```
+
+A case is a `recall` query plus the facts a good answer must contain. The
+report shows how many cases are answered from memories, how many only from
+raw screen text, how many facts survived distillation at all, time per
+session, dropped model replies, and entities the model named that never
+appeared in the captures. Distillation runs in a temporary directory; your
+real memories are not touched.
+
+The fixture (`~/.deepmem/eval/fixture.jsonl`) holds captured screen text.
+Keep it out of repositories. `deepmem forget` deletes it.
 
 ## Privacy controls
 
@@ -124,5 +147,6 @@ cd capture && cargo test
 
 - `capture/`: Rust daemon. Only writes raw tables to the SQLite file.
 - `memory/`: Python package. Reads raw tables, owns the search index, serves MCP.
+- `eval/`: example evaluation cases.
 - `testdata/`: redaction fixtures shared by the Rust and Python tests.
 - `tasks/todo.md`: slice plan.

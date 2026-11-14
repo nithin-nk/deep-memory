@@ -51,11 +51,17 @@ def test_compact_merges_repeated_captures_and_drops_partial_lines():
         frame(3, 2, "Google Chrome", "Tokio", "Runtime docs", url="https://tokio.rs/"),
         frame(4, 3, "Claude", "Claude", "Sidebar\nThe fix is to compare with <=\nDone."),
     ]
-    windows = compact(session, window_limit=10_000)
+    windows = compact(session, budget=10_000)
     assert [(w.app, w.url) for w in windows] == [("Claude", None), ("Google Chrome", "https://tokio.rs/")]
     assert windows[0].text == "Sidebar\nThe fix is to compare with <=\nDone."
     assert (windows[0].start, windows[0].end) == (session[0].ts, session[3].ts)
-    assert len(compact([frame(1, 0, text="x" * 5000)], window_limit=900)[0].text) < 1000
+    assert len(compact([frame(1, 0, text="x" * 5000)], budget=900)[0].text) < 1000
+
+    # Small windows stay whole; large ones share the rest; the total fits.
+    lines = lambda n: "\n".join(f"line number {i}" for i in range(n))
+    mixed = compact([frame(1, 0, "A", "a", lines(10)), frame(2, 1, "B", "b", lines(2000)), frame(3, 2, "C", "c", lines(3000))], budget=6000)
+    assert mixed[0].text == lines(10)
+    assert sum(len(w.text) for w in mixed) <= 6100 and len(mixed[1].text) > 2500 and len(mixed[2].text) > 2500
     assert [len(c) for c in chunk(windows * 3, budget=60)] == [2, 2, 2]
 
 
@@ -81,8 +87,9 @@ def test_run_once_writes_episode_for_closed_session_only(tmp_path):
     assert body.startswith("The user debugged the token expiry check")
     assert "## Decisions\n\n- Use <= instead of <" in body and "## Open items" not in body
 
-    # Nothing new is closed: the second run does no work.
+    # Nothing new is closed: the second run does no work and says why.
     assert run_once(db, CONFIG, model, now=(T0 + 22 * MIN) / 1000, log=logs.append) == 0 and len(prompts) == 1
+    assert "1 session still open" in logs[-1]
     # Once the open session has been idle long enough it is distilled too.
     assert run_once(db, CONFIG, model, now=(T0 + 40 * MIN) / 1000, log=logs.append) == 1
 

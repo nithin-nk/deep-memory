@@ -6,7 +6,9 @@ import subprocess
 import sys
 import time
 
-from deepmem import distill, store
+from pathlib import Path
+
+from deepmem import distill, evaluate, store
 
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -37,6 +39,13 @@ def main(argv: list[str] | None = None) -> int:
     distill_cmd = commands.add_parser("distill", help="turn captured sessions into memories with the local model")
     distill_cmd.add_argument("--force", action="store_true", help="run even on battery while you are active")
     distill_cmd.add_argument("--watch", action="store_true", help="keep running, one pass every 5 minutes")
+    export = commands.add_parser("export-fixture", help="freeze captured frames into a file for `deepmem eval`")
+    export.add_argument("--last", type=parse_duration, metavar="DURATION", help="only the last 30m, 1h, 2d, ... (default: all)")
+    export.add_argument("--out", type=Path, default=evaluate.FIXTURE, help=f"default: {evaluate.FIXTURE}")
+    eval_cmd = commands.add_parser("eval", help="score distillation and recall on a fixture")
+    eval_cmd.add_argument("--model", help="Ollama model to test (default: the configured one)")
+    eval_cmd.add_argument("--fixture", type=Path, default=evaluate.FIXTURE, help=f"default: {evaluate.FIXTURE}")
+    eval_cmd.add_argument("--cases", type=Path, default=evaluate.CASES, help=f"default: {evaluate.CASES}")
     args = parser.parse_args(argv)
 
     if args.command == "pause":
@@ -85,6 +94,22 @@ def main(argv: list[str] | None = None) -> int:
             if not args.watch:
                 break
             time.sleep(300)
+    elif args.command == "export-fixture":
+        count = evaluate.export_fixture(args.out, args.last)
+        print(f"Wrote {count} frames to {args.out}. The file holds captured screen text: keep it private.")
+    elif args.command == "eval":
+        for path in (args.fixture, args.cases):
+            if not path.exists():
+                print(f"deepmem: {path} not found (see README, Evaluation)", file=sys.stderr)
+                return 1
+        config = store.load_config()
+        if args.model:
+            config["model"] = args.model
+        try:
+            print(evaluate.format_report(evaluate.run(args.fixture, args.cases, config)))
+        except distill.ModelUnavailable as err:
+            print(f"deepmem: {err}", file=sys.stderr)
+            return 1
     return 0
 
 

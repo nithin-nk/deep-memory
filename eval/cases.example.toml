@@ -1,0 +1,17 @@
+# Evaluation cases for `deepmem eval`. Copy to ~/.deepmem/eval/cases.toml
+# and replace with questions from your own work.
+#
+# query    keywords an agent would pass to `recall` (all words must match)
+# expect   one string or a list; every string must appear in what recall
+#          returns (case-insensitive)
+# question optional note for humans
+
+[[case]]
+question = "Which comparison fixed the token expiry bug?"
+query = "token expiry"
+expect = "<="
+
+[[case]]
+question = "Which page did I read about the tokio runtime?"
+query = "tokio runtime"
+expect = ["tokio.rs"]

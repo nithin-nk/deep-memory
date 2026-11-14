@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 from deepmem import store
 
+_MIN_WINDOW_CHARS = 300  # every window keeps at least this much
+
 Frame = namedtuple("Frame", "id ts app title url text")
 Window = namedtuple("Window", "app title url start end text")
 
@@ -74,8 +76,14 @@ def _clip(text: str, limit: int) -> str:
     return text[:head] + "\n[...]\n" + text[-(limit - head) :]
 
 
-def compact(session: list[Frame], window_limit: int) -> list[Window]:
-    """One entry per window (app + title), in order of first appearance."""
+def compact(session: list[Frame], budget: int) -> list[Window]:
+    """One entry per window (app + title), in order of first appearance, with
+    the texts cut so that together they fit `budget` characters.
+
+    Small windows keep all their text; the large ones share what is left
+    equally. A session then normally yields one episode instead of several
+    overlapping parts.
+    """
     groups: dict[tuple[str, str], list[Frame]] = {}
     for frame in session:
         groups.setdefault((frame.app, frame.title), []).append(frame)
@@ -83,12 +91,22 @@ def compact(session: list[Frame], window_limit: int) -> list[Window]:
     for (app, title), frames in groups.items():
         text = "\n".join(_unique_lines([f.text for f in frames]))
         url = next((f.url for f in reversed(frames) if f.url), None)
-        windows.append(Window(app, title, url, frames[0].ts, frames[-1].ts, _clip(text, window_limit)))
+        windows.append(Window(app, title, url, frames[0].ts, frames[-1].ts, text))
+
+    remaining, left = budget, len(windows)
+    for index in sorted(range(len(windows)), key=lambda i: len(windows[i].text)):
+        share = max(_MIN_WINDOW_CHARS, remaining // left)
+        window = windows[index]
+        windows[index] = window._replace(text=_clip(window.text, share))
+        remaining -= len(windows[index].text)
+        left -= 1
     return windows
 
 
 def chunk(windows: list[Window], budget: int) -> list[list[Window]]:
-    """Pack windows into groups whose text fits the model context."""
+    """Pack windows into groups whose text fits the model context. After
+    `compact` this is one group, unless a session has so many windows that
+    even their minimum shares exceed the budget."""
     chunks: list[list[Window]] = [[]]
     used = 0
     for window in windows:
@@ -270,10 +288,12 @@ def run_once(db: Path = store.DB, config: dict | None = None, model=call_ollama,
             last = sessions[-1]
             still_open = now_ms - last[-1].ts < gap_s * 1000 and last[-1].ts - last[0].ts < max_s * 1000
             if still_open:
+                closes = min(last[-1].ts + gap_s * 1000, last[0].ts + max_s * 1000)
+                log(f"distill: 1 session still open, closes by {_clock(closes)} (or after {config['session_gap_minutes']} idle minutes)")
                 sessions.pop()
 
         for session in sessions:
-            windows = compact(session, window_limit=budget // 2)
+            windows = compact(session, budget)
             if sum(len(w.text) for w in windows) >= _MIN_SESSION_CHARS:
                 for part, group in enumerate(chunk(windows, budget)):
                     episode = distill(group, config, model, log)  # ModelUnavailable leaves the cursor untouched
