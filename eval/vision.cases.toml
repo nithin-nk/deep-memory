@@ -1,0 +1,20 @@
+# Vision cases for `deepmem eval`: three windows that exist only as pictures
+# (eval/vision.fixture.images/). Every expected string is visible in a picture
+# and nowhere else, so a case can only pass if the vision model read it.
+#
+#   deepmem eval --fixture eval/vision.fixture.jsonl --cases eval/vision.cases.toml
+
+[[case]]
+question = "Which Kafka topic feeds the ledger writer?"
+query = "kafka topic"
+expect = "orders.v2"
+
+[[case]]
+question = "Which region had the worst p95 latency, and how bad?"
+query = "latency region"
+expect = ["ap-south", "390"]
+
+[[case]]
+question = "How long did the rollback take, according to the retro board?"
+query = "retro rollback"
+expect = "47 min"

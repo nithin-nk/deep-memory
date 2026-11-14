@@ -31,6 +31,7 @@ CONFIG_DEFAULTS = {
     "distill_on_battery": False,
     "share_personal": False,  # may agents inside a project also read `personal` memories?
     "outside_project": "none",  # what an agent outside any repository reads: none | personal | all
+    "keep_screenshots": False,  # keep the JPEG (in frames/kept/) after the vision model described it
 }
 
 
@@ -50,6 +51,9 @@ def load_config(path: Path | None = None) -> dict:
 INDEX = "frames_fts_v3"  # v3 adds the project column
 _OLD_INDEXES = ("frames_fts", "frames_fts_v2")
 _LABEL_BUCKET_MS = 30 * 60 * 1000
+# A frame whose screenshot the vision model has not described yet. Described
+# frames have `image` NULL, or `kept/<file>` with `keep_screenshots`.
+PENDING_SHOT = "image IS NOT NULL AND image NOT LIKE 'kept/%'"
 
 
 # --- redaction --------------------------------------------------------------
@@ -333,11 +337,21 @@ def forget(seconds: float | None, db: Path = DB) -> int:
             if expired:
                 file.unlink()
                 deleted += 1
+        # Screenshots, described or not. By file time, so that one whose row
+        # is already gone is removed too.
+        shots = db.parent / "frames"
+        for file in shots.rglob("*.jpg") if shots.exists() else []:
+            if file.stat().st_mtime * 1000 >= cutoff:
+                file.unlink()
+                deleted += 1
         # An eval fixture is a frozen copy of captures and may cover the period.
         fixture = HOME / "eval" / "fixture.jsonl"
         if db == DB and fixture.exists():
             fixture.unlink()
             deleted += 1
+            for file in fixture.with_suffix(".images").glob("*.jpg"):
+                file.unlink()
+                deleted += 1
         # Row ids restart after a full delete; keep the distiller's cursor valid.
         try:
             newest = con.execute("SELECT coalesce(max(id), 0) FROM frames").fetchone()[0]
@@ -353,7 +367,7 @@ def forget(seconds: float | None, db: Path = DB) -> int:
 
 def stats(db: Path = DB) -> dict:
     """Row counts and last capture time, for `deepmem status`."""
-    result = {"events": 0, "frames": 0, "last_capture": None}
+    result = {"events": 0, "frames": 0, "last_capture": None, "screenshots_waiting": 0}
     if not db.exists():
         return result
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -366,6 +380,10 @@ def stats(db: Path = DB) -> dict:
             result[table] = count
             if last and (result["last_capture"] is None or last > result["last_capture"]):
                 result["last_capture"] = last
+        try:
+            result["screenshots_waiting"] = con.execute(f"SELECT count(*) FROM frames WHERE {PENDING_SHOT}").fetchone()[0]
+        except sqlite3.OperationalError:  # database from before the screenshot fallback
+            pass
     finally:
         con.close()
     if result["last_capture"]:

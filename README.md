@@ -4,9 +4,10 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 6 of [tasks/todo.md](tasks/todo.md). Records the focused
-window's text, distills work sessions into per-project Markdown memories with
-a local model, and lets each agent search only its own project. macOS only.
+Status: Slice 7 of [tasks/todo.md](tasks/todo.md). Records the focused
+window's text (from a screenshot when the window exposes none), distills work
+sessions into per-project Markdown memories with a local model, and lets each
+agent search only its own project. macOS only.
 
 ## Requirements
 
@@ -50,6 +51,39 @@ accessibility tree when focus changes, when keyboard or mouse input pauses for
 0.7 s, and at least every 5 s while you are active. A frame is stored only if
 its text differs from the previous one. Chromium and Electron apps are asked to
 enable their accessibility tree, otherwise they expose no page content.
+
+## Windows without text (screenshots)
+
+Canvas apps, image viewers, video and some games expose no text to the
+accessibility tree. When a window's text (not counting labels of toolbars,
+menus and buttons) stays under 200 characters for two captures in a row, the daemon saves a JPEG of that window (longest side at
+most 1600 px) to `~/.deepmem/frames/`, at most once a minute per window and
+only when the picture changed.
+
+This needs a second permission: System Settings > Privacy & Security >
+Screen & System Audio Recording, for the terminal that runs the daemon, then
+restart the daemon. Without it nothing changes: no screenshots are taken.
+macOS also shows an alert ("requesting to bypass the system private window
+picker") at the first screenshot and again from time to time; choose Allow.
+
+`deepmem distill` first has the local vision model describe each waiting
+screenshot (what it shows, plus the text visible in it). The result becomes
+the frame's text, so it is searched and distilled like any other frame.
+`deepmem status` shows how many screenshots are waiting.
+
+- Pause, the app denylist and the private-window rule apply before a
+  screenshot is taken, and the picture is of the focused window only, not of
+  the screen.
+- A picture cannot be redacted, so it stays on disk only until it is
+  described; the description goes through the same secret redaction as all
+  captured text. `deepmem forget` deletes screenshots too.
+- Windows that already have text are never screenshotted.
+
+```toml
+screenshots = true            # false: never take screenshots
+screenshot_below_chars = 200  # a window with less text than this counts as "no text"
+keep_screenshots = false      # true: keep described JPEGs in ~/.deepmem/frames/kept/
+```
 
 ## Memories
 
@@ -117,6 +151,18 @@ cp eval/cases.example.toml ~/.deepmem/eval/cases.toml   # then write your own ca
 deepmem eval                      # configured model
 deepmem eval --model qwen3-vl:4b  # any other pulled model
 ```
+
+Vision is measured the same way. The repository holds three picture-only
+windows (a diagram, a chart, a board of notes) and three questions whose
+answers are visible only in those pictures:
+
+```bash
+deepmem eval --fixture eval/vision.fixture.jsonl --cases eval/vision.cases.toml
+```
+
+`export-fixture` also copies screenshots that are still on disk (waiting, or
+kept with `keep_screenshots = true`) to `fixture.images/`, and `eval` has the
+model under test describe them again.
 
 A case is a `recall` query plus the facts a good answer must contain, and
 optionally a `project` to search as an agent in that project would. The

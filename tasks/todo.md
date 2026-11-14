@@ -137,13 +137,13 @@ Without this, later slices cannot show they improve anything.
 
 ## Slice 7: Vision fallback
 
-- [ ] Rust: when the accessibility tree returns empty or near-empty text,
+- [x] Rust: when the accessibility tree returns empty or near-empty text,
       capture a screenshot of the focused window (JPEG, downscaled) to
       `~/.deepmem/frames/`.
-- [ ] Python: send those frames to the vision model for a description plus
+- [x] Python: send those frames to the vision model for a description plus
       visible text; store the result as the frame's text. Batch under the
       same power/idle rule as Slice 4.
-- [ ] Denylist, pause and redaction from Slice 3 apply to screenshots.
+- [x] Denylist, pause and redaction from Slice 3 apply to screenshots.
       Delete the JPEG after it is described (config flag to keep).
 - **Human:** grant Screen Recording permission.
 - **Done when:** a canvas app or image-only window produces a frame with
@@ -428,3 +428,67 @@ scores.)
     visible to no scoped agent. Re-distilling moves them into projects.
   - `current_context` for a scoped agent hides windows that never showed a
     project sign.
+
+### Slice 7 (done; verified on one real window)
+
+- Verified: 4 Rust tests pass (1 new: when a window gets a screenshot, when
+  a picture is downscaled); 40 Python tests pass (9 new): a described
+  screenshot becomes searchable and its file is deleted; a secret read from
+  a picture is redacted before it is stored; `keep_screenshots`; retry then
+  drop; a model outage leaves screenshots waiting; `forget` deletes waiting,
+  kept and orphaned files; old databases; eval; the `distill` command.
+- Verified with the real model (`qwen3-vl:8b-instruct`): the vision fixture
+  in `eval/` (three synthetic picture-only windows) gave 3/3 screenshots
+  described and 3/3 cases answered from memories, 17.1 s in total, 0/6
+  entities absent from the captures.
+- Verified by running the daemon in a temporary home: a database from an
+  earlier build gets the `image` column; without Screen Recording permission
+  the daemon prints how to grant it and behaves as before.
+- "Done when" met on a real window (daemon run by the user with both
+  permissions): a chart opened in Preview got a 1600 x 1112 JPEG (85 KB) of
+  that window alone. The vision model described it in about 7 s: chart
+  type, title, all three regions and values, correct. The JPEG was deleted,
+  and `recall("latency region week")` returns the frame.
+- The first real attempt took no screenshot: Preview exposes about 250
+  characters of toolbar labels for a picture, over the 200 limit. Fixed:
+  labels inside toolbars, menus and controls are stored but do not count
+  towards the limit.
+- Observed: at the first screenshot macOS showed an alert, "Terminal is
+  requesting to bypass the system private window picker and directly access
+  your screen and audio". The screenshot was still written. macOS repeats
+  this alert from time to time for tools like `screencapture`; if it blocks
+  captures in practice, move to ScreenCaptureKit.
+- Observed: Preview's Live Text put the chart's words into the
+  accessibility tree a few seconds after the picture opened, so that frame
+  holds them twice (model and accessibility).
+- Not verified on real windows: a canvas web app, the private-window rule
+  with screenshots on, and how often low-value screenshots occur in a normal
+  working day.
+- The three vision questions are about synthetic pictures drawn for the
+  fixture, not real work. They show that the model reads pictures; the
+  user's own vision cases belong with the 15 owed since Slice 5.
+- Changes from plan:
+  - "Near-empty" is under 200 characters of content text
+    (`screenshot_below_chars`) on two captures in a row. One capture is not enough: the first capture of a
+    Chromium window is always small.
+  - At most one screenshot per window per minute, and none if the JPEG is
+    byte-identical to the previous one.
+  - The frame keeps the little accessibility text it had, after the
+    description. The row points at the file through a new column,
+    `frames.image`; Python sets it to NULL once described (or `kept/<file>`).
+    Python therefore updates `frames.text` for these rows, the one exception
+    to "Rust is the only writer of raw tables".
+  - The screenshot is taken by `screencapture -l <window id>` and scaled by
+    `sips`, not by ScreenCaptureKit. The window id comes from the private
+    call `_AXUIElementGetWindow`, so the picture is of exactly the window
+    that passed the privacy checks.
+  - One model for vision and distillation (`model`); no separate setting.
+  - Added `screenshots = false` to turn the fallback off.
+- Known limits:
+  - Apps with no accessibility window at all (some games) get no
+    screenshot: without a window title the private-window rule cannot run.
+  - A window with little text that is not a picture (an empty editor, a new
+    terminal) is screenshotted too and yields a low-value description.
+  - A video in a text-less window costs one model call per minute.
+  - A screenshot waits unredacted on disk (directory mode 0700) until the
+    next `deepmem distill` run.

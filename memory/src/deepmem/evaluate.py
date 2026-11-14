@@ -6,17 +6,22 @@ might send to `recall` plus the facts a good answer must contain. `run`
 distills the fixture in a temporary directory (real memories are untouched)
 and reports how many cases are answered, how long it took, and how many
 entities the model named that never appeared in the captures.
+
+Screenshots still on disk (waiting, or kept with `keep_screenshots`) are
+copied next to the fixture, in `<fixture name>.images/`. `run` has the model
+under test describe them again, so vision is measured too.
 """
 
 import json
 import re
+import shutil
 import sqlite3
 import tempfile
 import time
 import tomllib
 from pathlib import Path
 
-from deepmem import distill, store
+from deepmem import distill, store, vision
 
 EVAL_DIR = store.HOME / "eval"
 FIXTURE = EVAL_DIR / "fixture.jsonl"
@@ -26,23 +31,44 @@ _FIELDS = ("id", "ts", "app", "title", "url", "text")
 
 
 def export_fixture(path: Path = FIXTURE, seconds: float | None = None, db: Path = store.DB) -> int:
-    """Write captured frames (all, or the last `seconds`) to a JSON Lines file."""
+    """Write captured frames (all, or the last `seconds`) to a JSON Lines
+    file, and the screenshots still on disk to `<name>.images/` beside it."""
     cutoff = 0 if seconds is None else int((time.time() - seconds) * 1000)
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        has_image = any(column[1] == "image" for column in con.execute("PRAGMA table_info(frames)"))
         rows = con.execute(
-            "SELECT id, ts, app, title, url, text FROM frames WHERE ts >= ? ORDER BY id", (cutoff,)
+            f"SELECT id, ts, app, title, url, text, {'image' if has_image else 'NULL'} FROM frames "
+            "WHERE ts >= ? ORDER BY id",
+            (cutoff,),
         ).fetchall()
     finally:
         con.close()
     path.parent.mkdir(parents=True, exist_ok=True)
+    images = path.with_suffix(".images")
     with path.open("w", encoding="utf-8") as file:
-        for row in rows:
+        for *row, image in rows:
             record = dict(zip(_FIELDS, row))
             for key in ("title", "url", "text"):  # second layer; the daemon redacts already
                 record[key] = record[key] and store.redact(record[key])
+            shot = db.parent / "frames" / image if image else None
+            if shot and shot.exists():
+                images.mkdir(exist_ok=True)
+                shutil.copyfile(shot, images / shot.name)
+                record["image"] = shot.name
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     return len(rows)
+
+
+def fixture_images(path: Path) -> dict[int, Path]:
+    """Frame id -> screenshot file, for the fixture's frames that have one."""
+    found = {}
+    with path.open(encoding="utf-8") as file:
+        for record in (json.loads(line) for line in file if line.strip()):
+            shot = path.with_suffix(".images") / Path(record.get("image") or "-").name
+            if shot.exists():
+                found[record["id"]] = shot
+    return found
 
 
 def load_fixture(path: Path) -> list[distill.Frame]:
@@ -92,8 +118,9 @@ def _contains_all(text: str, expected: list[str]) -> bool:
     return all(item.lower() in text for item in expected)
 
 
-def run(fixture: Path, cases_path: Path, config: dict, model=distill.call_ollama) -> dict:
+def run(fixture: Path, cases_path: Path, config: dict, model=distill.call_ollama, vision_model=vision.call_vision) -> dict:
     frames = load_fixture(fixture)
+    images = fixture_images(fixture)
     cases = load_cases(cases_path)
     if not frames:
         raise ValueError(f"fixture {fixture} has no frames")
@@ -103,14 +130,24 @@ def run(fixture: Path, cases_path: Path, config: dict, model=distill.call_ollama
         con = sqlite3.connect(db)
         con.execute(
             "CREATE TABLE frames (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, app TEXT NOT NULL, "
-            "title TEXT NOT NULL, url TEXT, text TEXT NOT NULL)"
+            "title TEXT NOT NULL, url TEXT, text TEXT NOT NULL, image TEXT)"
         )
-        con.executemany("INSERT INTO frames (id, ts, app, title, url, text) VALUES (?, ?, ?, ?, ?, ?)", frames)
+        # A frame with a screenshot starts without text: the model under test
+        # has to describe it again.
+        (Path(tmp) / "frames").mkdir()
+        for shot in images.values():
+            shutil.copyfile(shot, Path(tmp) / "frames" / shot.name)
+        con.executemany(
+            "INSERT INTO frames (id, ts, app, title, url, text, image) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(*f[:5], "", images[f.id].name) if f.id in images else (*f, None) for f in frames],
+        )
         con.commit()
-        con.close()
 
         logs: list[str] = []
         started = time.time()
+        described = vision.describe_pending(db, {**config, "keep_screenshots": False}, vision_model, log=logs.append)
+        frames = [distill.Frame(*row) for row in con.execute("SELECT id, ts, app, title, url, text FROM frames ORDER BY id")]
+        con.close()
         # `now` far in the future: every session in the fixture counts as closed.
         episodes_written = distill.run_once(db, config, model, now=frames[-1].ts / 1000 + 86400, log=logs.append)
         seconds = time.time() - started
@@ -152,6 +189,8 @@ def run(fixture: Path, cases_path: Path, config: dict, model=distill.call_ollama
         "sessions": sessions,
         "episodes": episodes_written,
         "dropped": sum("dropped frames" in line for line in logs),
+        "screenshots": len(images),
+        "screenshots_described": described,
         "seconds": round(seconds, 1),
         "entities": entity_total,
         "entities_unsupported": entity_missing,
@@ -168,6 +207,7 @@ def format_report(report: dict) -> str:
         f"model                      {report['model']}",
         f"input                      {report['frames']} frames, {report['sessions']} sessions",
         f"episodes written           {report['episodes']}  (dropped replies: {report['dropped']})",
+        f"screenshots described      {report['screenshots_described']}/{report['screenshots']}",
         f"time                       {report['seconds']} s  ({report['seconds'] / max(report['sessions'], 1):.1f} s per session)",
         f"answered from memories     {count(lambda c: c['outcome'] == 'memory')}/{len(cases)}  ({100 * count(lambda c: c['outcome'] == 'memory') // total}%)",
         f"answered incl. screen text {count(lambda c: c['outcome'] != 'miss')}/{len(cases)}  ({100 * count(lambda c: c['outcome'] != 'miss') // total}%)",

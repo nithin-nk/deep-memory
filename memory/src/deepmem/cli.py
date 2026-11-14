@@ -8,7 +8,7 @@ import time
 
 from pathlib import Path
 
-from deepmem import distill, evaluate, store
+from deepmem import distill, evaluate, store, vision
 
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"capture:      {state}")
         print(f"focus events: {info['events']}")
         print(f"text frames:  {info['frames']}")
+        print(f"screenshots:  {info['screenshots_waiting']} waiting for `deepmem distill`")
         print(f"last capture: {info['last_capture'] or 'never'}")
         print(f"database:     {store.DB}")
     elif args.command == "forget":
@@ -83,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             if args.force or distill.allowed_now(config):
                 try:
+                    described = vision.describe_pending(config=config)
+                    if described:
+                        print(f"Described {described} screenshot(s).")
                     count = distill.run_once(config=config)
                     print(f"Wrote {count} episode(s) to {store.DB.parent / 'memories'}.")
                 except distill.ModelUnavailable as err:
@@ -97,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "export-fixture":
         count = evaluate.export_fixture(args.out, args.last)
         print(f"Wrote {count} frames to {args.out}. The file holds captured screen text: keep it private.")
+        images = args.out.with_suffix(".images")
+        if images.exists():
+            print(f"Screenshots are in {images}: keep them private too.")
     elif args.command == "eval":
         for path in (args.fixture, args.cases):
             if not path.exists():

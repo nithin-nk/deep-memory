@@ -2,6 +2,9 @@
 //!
 //! - `events`: one row per focus change (app, window title).
 //! - `frames`: text of the focused window, read from the accessibility tree.
+//!   When that tree exposes (almost) no text, a screenshot of the window is
+//!   saved next to the database in `frames/` and named in `frames.image`;
+//!   the Python side describes it with the vision model.
 //!
 //! Contract with the Python side: this daemon is the only one that inserts
 //! into these raw tables in ~/.deepmem/db.sqlite (override with DEEPMEM_DB).
@@ -11,7 +14,10 @@
 //! Privacy controls (all state lives in ~/.deepmem, override with DEEPMEM_HOME):
 //! - `paused` flag file: while it exists nothing is recorded. Toggled by
 //!   Ctrl+Option+Cmd+P, the menu bar item, or `deepmem pause` / `deepmem resume`.
-//! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded.
+//! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded;
+//!   `screenshots = false` turns the screenshot fallback off.
+//! Screenshots are taken only after the pause, denylist and private-window
+//! checks, and only of the one window that passed them.
 
 mod redact;
 
@@ -40,7 +46,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::os::unix::fs::PermissionsExt;
+use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, ptr, thread};
@@ -60,9 +67,30 @@ const MAX_DEPTH: usize = 40;
 const MAX_TEXT_BYTES: usize = 50_000;
 const WALK_BUDGET: Duration = Duration::from_millis(1_500);
 
+/// A window with less content text than this is treated as showing its
+/// content only as pixels. Labels of toolbars, menus and buttons do not count:
+/// Preview showing a picture exposes about 250 characters of them. Override
+/// with `screenshot_below_chars` in config.toml.
+const SCREENSHOT_BELOW_CHARS: usize = 200;
+/// At most one screenshot per window in this time, however often it changes.
+const SHOT_INTERVAL: Duration = Duration::from_secs(60);
+/// Longest side of a stored screenshot, in pixels.
+const SHOT_MAX_SIDE: u32 = 1600;
+const SHOT_JPEG_QUALITY: &str = "70";
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    // Private, but unchanged for many macOS releases and the only way to get
+    // the window id of exactly the accessibility window that passed the
+    // privacy checks (a lookup by process could pick another window).
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError;
 }
 
 /// Seconds since the last keyboard or mouse input. Needs no permission.
@@ -229,24 +257,43 @@ const DEFAULT_DENYLIST: [&str; 13] = [
     "loginwindow", // lock screen
 ];
 
-/// Built-in denylist plus `denylist = [...]` from config.toml. A config file
-/// that cannot be parsed stops the daemon: privacy settings must not be
-/// ignored silently.
-fn load_denylist(home: &Path) -> Vec<String> {
-    let mut list: Vec<String> = DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect();
+struct Config {
+    /// Built-in denylist plus `denylist = [...]`.
+    denylist: Vec<String>,
+    /// `screenshots = false` turns the screenshot fallback off.
+    screenshots: bool,
+    screenshot_below_chars: usize,
+}
+
+/// Settings from config.toml. A config file that cannot be parsed stops the
+/// daemon: privacy settings must not be ignored silently.
+fn load_config(home: &Path) -> Config {
+    let mut config = Config {
+        denylist: DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect(),
+        screenshots: true,
+        screenshot_below_chars: SCREENSHOT_BELOW_CHARS,
+    };
     let path = home.join("config.toml");
-    let Ok(text) = fs::read_to_string(&path) else { return list };
+    let Ok(text) = fs::read_to_string(&path) else { return config };
     match text.parse::<toml::Table>() {
-        Ok(config) => {
-            let extra = config.get("denylist").and_then(|v| v.as_array());
-            list.extend(extra.into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_lowercase));
+        Ok(table) => {
+            let extra = table.get("denylist").and_then(|v| v.as_array());
+            config
+                .denylist
+                .extend(extra.into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_lowercase));
+            if let Some(on) = table.get("screenshots").and_then(|v| v.as_bool()) {
+                config.screenshots = on;
+            }
+            if let Some(n) = table.get("screenshot_below_chars").and_then(|v| v.as_integer()) {
+                config.screenshot_below_chars = n.max(0) as usize;
+            }
         }
         Err(err) => {
             eprintln!("deepmem-capture: cannot parse {}: {err}", path.display());
             process::exit(1);
         }
     }
-    list
+    config
 }
 
 fn app_denied(app: &str, denylist: &[String]) -> bool {
@@ -334,7 +381,17 @@ struct Walker {
     nodes: usize,
     deadline: Instant,
     last_line: String,
+    /// Characters of `text` that are content, not labels of controls.
+    content_chars: usize,
 }
+
+/// Containers whose whole subtree is interface, not content.
+const CHROME_ROLES: [&str; 3] = ["AXToolbar", "AXMenuBar", "AXMenu"];
+/// Controls: their labels (and their children's) are not content.
+const CONTROL_ROLES: [&str; 8] = [
+    "AXButton", "AXMenuButton", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXMenuItem",
+    "AXDisclosureTriangle", "AXSlider",
+];
 
 impl Walker {
     // Order matters: `visit` reads the reply by index.
@@ -350,14 +407,18 @@ impl Walker {
             nodes: 0,
             deadline: Instant::now() + WALK_BUDGET,
             last_line: String::new(),
+            content_chars: 0,
         }
     }
 
-    fn push(&mut self, line: &str) {
+    fn push(&mut self, line: &str, chrome: bool) {
         let line = line.trim();
         // Title, value and description of one element often repeat each other.
         if line.is_empty() || line == self.last_line {
             return;
+        }
+        if !chrome {
+            self.content_chars += line.chars().count();
         }
         self.text.push_str(line);
         self.text.push('\n');
@@ -370,7 +431,8 @@ impl Walker {
             || Instant::now() >= self.deadline
     }
 
-    fn visit(&mut self, element: AXUIElementRef, depth: usize) {
+    /// `chrome`: the element lies inside a toolbar, menu or control.
+    fn visit(&mut self, element: AXUIElementRef, depth: usize, chrome: bool) {
         if depth > MAX_DEPTH || self.full() {
             return;
         }
@@ -399,12 +461,14 @@ impl Walker {
         if string(1).as_deref() == Some("AXSecureTextField") {
             return;
         }
+        let role = string(0);
+        let chrome = chrome || role.as_deref().is_some_and(is_chrome_role);
         for i in [3, 2, 4] {
             if let Some(s) = string(i) {
-                self.push(&s);
+                self.push(&s, chrome);
             }
         }
-        if self.url.is_none() && string(0).as_deref() == Some("AXWebArea") {
+        if self.url.is_none() && role.as_deref() == Some("AXWebArea") {
             self.url = values
                 .get(5)
                 .and_then(|v| v.downcast::<CFURL>())
@@ -412,10 +476,14 @@ impl Walker {
         }
         if let Some(children) = values.get(6).and_then(|v| v.downcast::<CFArray>()) {
             for child in children.iter() {
-                self.visit(*child as AXUIElementRef, depth + 1);
+                self.visit(*child as AXUIElementRef, depth + 1, chrome);
             }
         }
     }
+}
+
+fn is_chrome_role(role: &str) -> bool {
+    CHROME_ROLES.contains(&role) || CONTROL_ROLES.contains(&role)
 }
 
 /// Decides whether a captured text is worth storing: not blank, and different
@@ -439,6 +507,88 @@ impl Dedupe {
     }
 }
 
+/// Decides when a window gets a screenshot: it had (almost) no content text
+/// on two captures in a row (the first capture of a Chromium
+/// window is always small, its tree is built on request), and then at most
+/// once per `SHOT_INTERVAL`.
+#[derive(Default)]
+struct ShotGate {
+    streak: u32,
+    last_shot: Option<Instant>,
+}
+
+impl ShotGate {
+    fn due(&mut self, content_chars: usize, focus_changed: bool, below_chars: usize, now: Instant) -> bool {
+        if focus_changed {
+            self.streak = 0;
+        }
+        if content_chars >= below_chars {
+            self.streak = 0;
+            return false;
+        }
+        self.streak += 1;
+        let waited = self.last_shot.map_or(true, |t| now.duration_since(t) >= SHOT_INTERVAL);
+        let due = self.streak == 2 || (self.streak > 2 && waited);
+        if due {
+            self.last_shot = Some(now);
+        }
+        due
+    }
+}
+
+/// `sips -g pixelWidth -g pixelHeight` output ("  pixelWidth: 2880" ...):
+/// is either side longer than `SHOT_MAX_SIDE`?
+fn needs_downscale(sips_output: &str) -> bool {
+    sips_output
+        .lines()
+        .filter_map(|line| line.rsplit_once(": ")?.1.trim().parse::<u32>().ok())
+        .any(|side| side > SHOT_MAX_SIDE)
+}
+
+/// Saves a downscaled JPEG of exactly this window into `dir`. Returns the
+/// file name and a hash of its bytes, or None if the window cannot be
+/// captured.
+// ponytail: up to three short-lived system tools (~0.3 s, blocking the loop) instead
+// of ScreenCaptureKit; screenshots are rare. Switch if the pause is noticed.
+fn screenshot(window: &CFType, dir: &Path) -> Option<(String, u64)> {
+    let mut window_id = 0u32;
+    if unsafe { _AXUIElementGetWindow(as_element(window), &mut window_id) } != kAXErrorSuccess
+        || window_id == 0
+    {
+        return None;
+    }
+    let name = format!("{}.jpg", now_ms());
+    let path = dir.join(&name);
+    let run = |command: &mut Command| {
+        let output = command.stderr(Stdio::null()).output().ok().filter(|o| o.status.success())?;
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    // -x no sound, -o no window shadow, -l only this window (not what covers it)
+    let ok = run(Command::new("/usr/sbin/screencapture")
+        .args(["-x", "-o", "-t", "jpg", "-l", &window_id.to_string()])
+        .arg(&path))
+    .and_then(|_| {
+        run(Command::new("/usr/bin/sips").args(["-g", "pixelWidth", "-g", "pixelHeight"]).arg(&path))
+    })
+    .and_then(|size| {
+        if !needs_downscale(&size) {
+            return Some(()); // `sips -Z` would enlarge a small window
+        }
+        run(Command::new("/usr/bin/sips")
+            .args(["-Z", &SHOT_MAX_SIDE.to_string(), "-s", "formatOptions", SHOT_JPEG_QUALITY])
+            .arg(&path))
+        .map(|_| ())
+    })
+    .is_some();
+    let Some(bytes) = fs::read(&path).ok().filter(|_| ok) else {
+        let _ = fs::remove_file(&path);
+        return None;
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some((name, hasher.finish()))
+}
+
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
@@ -449,12 +599,15 @@ fn home_dir() -> PathBuf {
     })
 }
 
-fn open_db(home: &Path) -> rusqlite::Result<Connection> {
-    let path = env::var_os("DEEPMEM_DB").map(PathBuf::from).unwrap_or_else(|| home.join("db.sqlite"));
+fn db_path(home: &Path) -> PathBuf {
+    env::var_os("DEEPMEM_DB").map(PathBuf::from).unwrap_or_else(|| home.join("db.sqlite"))
+}
+
+fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).expect("cannot create database directory");
     }
-    let db = Connection::open(&path)?;
+    let db = Connection::open(path)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.busy_timeout(Duration::from_secs(5))?; // the Python side writes its index here too
     db.execute_batch(
@@ -470,9 +623,14 @@ fn open_db(home: &Path) -> rusqlite::Result<Connection> {
             app   TEXT NOT NULL,
             title TEXT NOT NULL,
             url   TEXT,             -- set when the window shows web content
-            text  TEXT NOT NULL
+            text  TEXT NOT NULL,
+            image TEXT              -- screenshot file in frames/, until it is described
         );",
     )?;
+    // Databases created before the screenshot fallback lack the column.
+    if !db.prepare("SELECT 1 FROM pragma_table_info('frames') WHERE name = 'image'")?.exists([])? {
+        db.execute("ALTER TABLE frames ADD COLUMN image TEXT", [])?;
+    }
     redact_existing_rows(&db)?;
     eprintln!("deepmem-capture: writing to {}", path.display());
     Ok(db)
@@ -538,9 +696,33 @@ fn main() -> rusqlite::Result<()> {
 
     let home = home_dir();
     fs::create_dir_all(&home).expect("cannot create deep-memory directory");
-    let denylist = load_denylist(&home);
+    let config = load_config(&home);
+    let denylist = &config.denylist;
     let paused_flag = home.join("paused");
-    let db = open_db(&home)?;
+    let db_file = db_path(&home);
+    let db = open_db(&db_file)?;
+
+    // Screenshot fallback for windows without accessibility text.
+    let shots_dir = db_file.parent().unwrap_or(&home).join("frames");
+    let mut vision = config.screenshots && unsafe { CGPreflightScreenCaptureAccess() };
+    if config.screenshots && !vision {
+        unsafe { CGRequestScreenCaptureAccess() }; // shows the system prompt once
+        eprintln!(
+            "deepmem-capture: no Screen Recording permission, windows without \
+             readable text are skipped.\nSystem Settings > Privacy & Security > \
+             Screen & System Audio Recording: enable the terminal (or app) that \
+             runs this binary, then start it again."
+        );
+    }
+    if vision {
+        // Screenshots are not redacted until they are described: owner only.
+        let private = fs::create_dir_all(&shots_dir)
+            .and_then(|_| fs::set_permissions(&shots_dir, fs::Permissions::from_mode(0o700)));
+        if let Err(err) = private {
+            eprintln!("deepmem-capture: cannot prepare {}: {err}", shots_dir.display());
+            vision = false;
+        }
+    }
     let debug = env::var_os("DEEPMEM_DEBUG").is_some();
 
     if register_pause_hotkey() {
@@ -558,6 +740,8 @@ fn main() -> rusqlite::Result<()> {
     let mut last_error: AXError = kAXErrorSuccess;
     let mut last_capture = Instant::now() - FALLBACK;
     let mut dedupe = Dedupe::default();
+    let mut shot_gate = ShotGate::default();
+    let mut last_shot_hash = 0u64;
 
     // ponytail: polls every 250 ms and infers "typing pause / scroll stop /
     // click" from the system idle timer, which needs no extra permission.
@@ -600,7 +784,7 @@ fn main() -> rusqlite::Result<()> {
         }
 
         let Some((app, pid)) = frontmost() else { continue };
-        if app_denied(&app, &denylist) {
+        if app_denied(&app, denylist) {
             last_focus = None;
             continue; // before any accessibility call into the app
         }
@@ -638,21 +822,47 @@ fn main() -> rusqlite::Result<()> {
         let fallback_due = since_capture >= FALLBACK && idle < AWAY_SECS;
         if let (Ok(window), true) = (&window, focus_changed || input_settled || fallback_due) {
             let mut walker = Walker::new();
-            walker.visit(as_element(window), 0);
+            walker.visit(as_element(window), 0, false);
             last_capture = Instant::now();
             let text = redact(&walker.text);
             let url = walker.url.as_deref().map(redact);
-            if dedupe.is_new(&text) {
+            let new_text = dedupe.is_new(&text);
+            // This point is reached only for a window that is not paused,
+            // denylisted or private, and the screenshot is of that window only.
+            let mut image = None;
+            if vision
+                && shot_gate.due(
+                    walker.content_chars,
+                    focus_changed,
+                    config.screenshot_below_chars,
+                    last_capture,
+                )
+            {
+                match screenshot(window, &shots_dir) {
+                    // Same pixels as the last screenshot: nothing new to describe.
+                    Some((name, hash)) if hash == last_shot_hash => {
+                        let _ = fs::remove_file(shots_dir.join(name));
+                    }
+                    Some((name, hash)) => {
+                        last_shot_hash = hash;
+                        image = Some(name);
+                    }
+                    None => {}
+                }
+            }
+            if new_text || image.is_some() {
                 db.execute(
-                    "INSERT INTO frames (ts, app, title, url, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (now_ms(), app, title, &url, &text),
+                    "INSERT INTO frames (ts, app, title, url, text, image) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (now_ms(), app, title, &url, &text, &image),
                 )?;
                 if debug {
                     eprintln!(
-                        "frame: {app}, {} nodes, {} bytes, url: {}",
+                        "frame: {app}, {} nodes, {} bytes ({} content chars), url: {}, screenshot: {}",
                         walker.nodes,
                         text.len(),
-                        url.is_some()
+                        walker.content_chars,
+                        url.is_some(),
+                        image.is_some()
                     );
                 }
             }
@@ -680,6 +890,33 @@ mod tests {
         assert!(window_denied("Example — Mozilla Firefox Private Browsing"));
         assert!(window_denied("nithin — deepmem-capture — 80×24"));
         assert!(!window_denied("deep-memory/tasks/todo.md - Google Chrome"));
+    }
+
+    #[test]
+    fn screenshot_only_for_windows_that_stay_without_text() {
+        let t0 = Instant::now();
+        let later = |secs| t0 + Duration::from_secs(secs);
+        let long = SCREENSHOT_BELOW_CHARS;
+        assert!(is_chrome_role("AXToolbar") && is_chrome_role("AXButton"));
+        assert!(!is_chrome_role("AXStaticText") && !is_chrome_role("AXWebArea"));
+        let mut gate = ShotGate::default();
+        // A window with readable text never gets a screenshot.
+        assert!(!gate.due(long, true, SCREENSHOT_BELOW_CHARS, t0));
+        assert!(!gate.due(long, false, SCREENSHOT_BELOW_CHARS, later(5)));
+        // Near-empty: not on the first capture (the tree may still be loading),
+        // on the second, then not again until the interval has passed.
+        assert!(!gate.due(10, true, SCREENSHOT_BELOW_CHARS, later(10)));
+        assert!(gate.due(10, false, SCREENSHOT_BELOW_CHARS, later(15)));
+        assert!(!gate.due(0, false, SCREENSHOT_BELOW_CHARS, later(20)));
+        assert!(gate.due(0, false, SCREENSHOT_BELOW_CHARS, later(15 + SHOT_INTERVAL.as_secs())));
+        // Text showing up in between starts over.
+        assert!(!gate.due(long, false, SCREENSHOT_BELOW_CHARS, later(100)));
+        assert!(!gate.due(0, false, SCREENSHOT_BELOW_CHARS, later(105)));
+        assert!(needs_downscale("/tmp/a.jpg\n  pixelWidth: 2880\n  pixelHeight: 1800\n"));
+        assert!(!needs_downscale("/tmp/a.jpg\n  pixelWidth: 1400\n  pixelHeight: 800\n"));
+        // A threshold of 0 never matches.
+        assert!(!gate.due(0, false, 0, later(110)));
+        assert!(!gate.due(0, false, 0, later(115)));
     }
 
     #[test]

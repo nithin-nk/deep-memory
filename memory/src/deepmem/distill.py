@@ -183,16 +183,17 @@ def build_prompt(windows: list[Window]) -> str:
     return store.redact("\n".join(parts))
 
 
-def call_ollama(prompt: str, config: dict) -> str:
-    """One chat completion from the local Ollama server; returns the reply text."""
+def chat(config: dict, system: str, user: str, schema: dict, images: list[str] | None = None) -> str:
+    """One chat completion from the local Ollama server; returns the reply
+    text. `images` are base64-encoded pictures attached to the user message."""
     host = urlparse(config["ollama_url"]).hostname
     if host not in ("localhost", "127.0.0.1", "::1"):
-        # Captured screen text must not leave this machine (remote models: Slice 11).
+        # Captured screen text and screenshots must not leave this machine (remote models: Slice 11).
         raise ValueError(f"ollama_url must point at this machine, got {config['ollama_url']!r}")
     body = {
         "model": config["model"],
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
-        "format": EPISODE_SCHEMA,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user, **({"images": images} if images else {})}],
+        "format": schema,
         "stream": False,
         "think": False,
         # num_predict stops a model that falls into a repetition loop; a reply
@@ -212,6 +213,10 @@ def call_ollama(prompt: str, config: dict) -> str:
         raise ModelUnavailable(f"Ollama returned HTTP {err.code}: {detail}") from err
     except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
         raise ModelUnavailable(f"cannot reach Ollama at {config['ollama_url']}: {err}") from err
+
+
+def call_ollama(prompt: str, config: dict) -> str:
+    return chat(config, SYSTEM_PROMPT, prompt, EPISODE_SCHEMA)
 
 
 def parse_episode(reply: str) -> dict | None:
