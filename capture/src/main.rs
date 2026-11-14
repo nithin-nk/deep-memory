@@ -6,10 +6,14 @@
 //! Contract with the Python side: this daemon is the only one that inserts
 //! into these raw tables in ~/.deepmem/db.sqlite (override with DEEPMEM_DB).
 //!
+//! Secrets are redacted (see `redact.rs`) before any row is inserted.
+//!
 //! Privacy controls (all state lives in ~/.deepmem, override with DEEPMEM_HOME):
 //! - `paused` flag file: while it exists nothing is recorded. Toggled by
 //!   Ctrl+Option+Cmd+P, the menu bar item, or `deepmem pause` / `deepmem resume`.
 //! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded.
+
+mod redact;
 
 use accessibility_sys::{
     kAXErrorSuccess, AXError, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
@@ -30,6 +34,7 @@ use objc2_app_kit::{
     NSStatusItem, NSWorkspace,
 };
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSString};
+use redact::redact;
 use rusqlite::Connection;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -467,8 +472,51 @@ fn open_db(home: &Path) -> rusqlite::Result<Connection> {
             text  TEXT NOT NULL
         );",
     )?;
+    redact_existing_rows(&db)?;
     eprintln!("deepmem-capture: writing to {}", path.display());
     Ok(db)
+}
+
+/// One-time cleanup: rows written before the daemon redacted at insert time
+/// may hold secrets. `user_version` 1 marks a database that is clean.
+fn redact_existing_rows(db: &Connection) -> rusqlite::Result<()> {
+    if db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= 1 {
+        return Ok(());
+    }
+    db.pragma_update(None, "secure_delete", "ON")?; // overwrite the old cell contents
+    let mut changed = 0;
+    {
+        let mut frames = db.prepare("SELECT id, title, url, text FROM frames")?;
+        let rows = frames.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
+        })?;
+        for row in rows {
+            let (id, title, url, text) = row?;
+            let clean = (redact(&title), url.as_deref().map(redact), redact(&text));
+            if clean != (title, url, text) {
+                changed += db.execute(
+                    "UPDATE frames SET title = ?1, url = ?2, text = ?3 WHERE id = ?4",
+                    (&clean.0, &clean.1, &clean.2, id),
+                )?;
+            }
+        }
+        let mut events = db.prepare("SELECT id, title FROM events")?;
+        let rows = events.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, title) = row?;
+            let clean = redact(&title);
+            if clean != title {
+                changed += db.execute("UPDATE events SET title = ?1 WHERE id = ?2", (&clean, id))?;
+            }
+        }
+    }
+    db.pragma_update(None, "user_version", 1)?;
+    // The WAL still holds the old pages until it is checkpointed.
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    if changed > 0 {
+        eprintln!("deepmem-capture: redacted secrets in {changed} existing rows");
+    }
+    Ok(())
 }
 
 fn main() -> rusqlite::Result<()> {
@@ -573,7 +621,7 @@ fn main() -> rusqlite::Result<()> {
             continue;
         }
 
-        let focus = Some((app, title));
+        let focus = Some((app, redact(&title)));
         let focus_changed = focus != last_focus;
         let (app, title) = focus.as_ref().unwrap();
         if focus_changed {
@@ -591,17 +639,19 @@ fn main() -> rusqlite::Result<()> {
             let mut walker = Walker::new();
             walker.visit(as_element(window), 0);
             last_capture = Instant::now();
-            if dedupe.is_new(&walker.text) {
+            let text = redact(&walker.text);
+            let url = walker.url.as_deref().map(redact);
+            if dedupe.is_new(&text) {
                 db.execute(
                     "INSERT INTO frames (ts, app, title, url, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (now_ms(), app, title, &walker.url, &walker.text),
+                    (now_ms(), app, title, &url, &text),
                 )?;
                 if debug {
                     eprintln!(
                         "frame: {app}, {} nodes, {} bytes, url: {}",
                         walker.nodes,
-                        walker.text.len(),
-                        walker.url.is_some()
+                        text.len(),
+                        url.is_some()
                     );
                 }
             }

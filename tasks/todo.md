@@ -290,9 +290,14 @@ scores.)
   - Python code moved to `store.py`; `server.py` only declares MCP tools.
   - The daemon skips its own terminal window (title contains
     `deepmem-capture`).
-- Open gap: redaction happens at indexing, so `frames.text` on disk is
-  still raw. Options: redact in the daemon before insert (needs the rules in
-  Rust), or shorten raw retention in Slice 8. Decide before Slice 4.
+- Gap closed (user decision: redact in Rust): the daemon now redacts
+  title, URL and text before insert (`capture/src/redact.rs`), so secrets
+  never reach disk. Python keeps the same rules for indexing, output and
+  later sources. Both are tested against `testdata/redaction_*.txt` so the
+  two rule sets cannot drift unnoticed. On first start the daemon redacts
+  rows written by earlier builds once (`PRAGMA user_version = 1`) with
+  secure delete and a WAL truncate. Verified on a seeded temporary database:
+  2 rows cleaned, none of the ten fixture secrets left in the database files.
 - Follow-up after user feedback ("cannot see the app in the menu bar,
   shortcut not working"): added a menu bar status item (`◉` recording, `⏸`
   paused) with Pause/Resume and Quit. The daemon is now an accessory

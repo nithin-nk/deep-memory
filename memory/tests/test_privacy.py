@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
@@ -11,31 +12,11 @@ from deepmem.store import INDEX, forget, redact, search
 FRAMES = "CREATE TABLE frames (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, app TEXT NOT NULL, title TEXT NOT NULL, url TEXT, text TEXT NOT NULL)"
 EVENTS = "CREATE TABLE events (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, app TEXT NOT NULL, title TEXT NOT NULL)"
 
-# Fake values with the shape of real secrets.
-SECRETS = [
-    "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
-    "AKIAIOSFODNN7EXAMPLE",
-    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-    "xoxb-123456789012-abcdefghijkl",
-    "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
-    "sk_live_abcdefghijklmnop1234",
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
-    "4111 1111 1111 1111",
-    "hunter2hunter2",
-    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
-]
-SCREEN = f"""export OPENAI_API_KEY={SECRETS[0]}
-aws_access_key_id = {SECRETS[1]}
-git remote set-url origin https://{SECRETS[2]}@github.com/x/y
-slack {SECRETS[3]} google {SECRETS[4]} stripe {SECRETS[5]}
-Authorization: Bearer {SECRETS[6]}
-card {SECRETS[7]}
-password: {SECRETS[8]}
------BEGIN RSA PRIVATE KEY-----
-{SECRETS[9]}
------END RSA PRIVATE KEY-----
-the deploy checklist is done
-"""
+# Fake values with the shape of real secrets, shared with the Rust daemon's
+# tests so that both implementations of the rules stay in step.
+_TESTDATA = Path(__file__).parents[2] / "testdata"
+SECRETS = (_TESTDATA / "redaction_secrets.txt").read_text().splitlines()
+SCREEN = (_TESTDATA / "redaction_screen.txt").read_text()
 
 
 def test_redact_removes_every_secret_and_keeps_normal_text():

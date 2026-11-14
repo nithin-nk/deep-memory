@@ -65,18 +65,17 @@ enable their accessibility tree, otherwise they expose no page content.
   ```
 
 - **Secrets:** API keys, tokens, private keys, passwords in `name = value`
-  form and card numbers are replaced with `[REDACTED:kind]` before text is
-  indexed or returned to an agent.
+  form and card numbers are replaced with `[REDACTED:kind]` by the daemon
+  before anything is written to disk, and again before text is indexed or
+  returned to an agent.
 - **Forget:** `deepmem forget --last 1h` or `deepmem forget --all` deletes
   captured data and overwrites it in the database file.
 - **Status:** `deepmem status`.
 
 Run the CLI with `uv run --directory /absolute/path/to/deep-memory/memory deepmem <command>`.
 
-Known limits: the raw `frames` table still holds unredacted text until it is
-forgotten (redaction happens at indexing); secret detection is pattern based,
-so an unlabelled random string is not caught; the database is not encrypted
-yet (Slice 10).
+Known limits: secret detection is pattern based, so an unlabelled random
+string is not caught; the database is not encrypted yet (Slice 10).
 
 ## Test
 
@@ -92,4 +91,5 @@ cd capture && cargo test
 
 - `capture/`: Rust daemon. Only writes raw tables to the SQLite file.
 - `memory/`: Python package. Reads raw tables, owns the search index, serves MCP.
+- `testdata/`: redaction fixtures shared by the Rust and Python tests.
 - `tasks/todo.md`: slice plan.
