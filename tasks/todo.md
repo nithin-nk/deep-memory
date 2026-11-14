@@ -106,6 +106,29 @@ The core of the product.
   distiller on a fixture session with a stubbed model.
 - Out of scope: vision, consolidation, project scoping.
 
+## Slice 4b: Desktop window (added on user request)
+
+A window in the Rust menu bar app: native window, UI in an embedded
+WKWebView, no network port.
+
+- [x] Rust: `api.rs`, the window's requests as JSON in and out (status,
+      pause, memory list / search / read / delete, settings), no AppKit.
+- [x] Rust: `config.rs`, rules and settings in `config.toml`; saving keeps
+      comments and unknown keys; invalid values are refused.
+- [x] Rust: `url_blocklist`. Nothing is stored for a blocked page; the focus
+      event is written only after the page's address is known.
+- [x] Rust: `config.toml` is reloaded when it changes, no restart.
+- [x] Rust: `window.rs` + `ui.html`, three tabs (Memories, Blocked sites,
+      Settings); menu item "Open deep-memory…"; `--window` flag.
+- [x] The daemon never records its own window.
+- **Human:** block a site, open it and an allowed site in a browser, check
+  that only the allowed one produces rows (needs Accessibility permission).
+- **Done when:** tests cover URL matching, settings round trip, memory
+  delete path checks; the window lists, searches and deletes memories and
+  saves settings.
+- Out of scope: forget from the window, editing memories in the window,
+  deleting earlier captures of a newly blocked site.
+
 ## Slice 5: Evaluation harness
 
 Without this, later slices cannot show they improve anything.
@@ -201,8 +224,8 @@ Without this, later slices cannot show they improve anything.
 
 ## Later, not planned
 
-Audio capture, Windows/Linux, vector search, a GUI for browsing memories,
-exposing memory to non-coding agents. Add when a real need shows up.
+Audio capture, Windows/Linux, vector search, exposing memory to non-coding
+agents. Add when a real need shows up.
 
 ## Review
 
@@ -492,3 +515,47 @@ scores.)
   - A video in a text-less window costs one model call per minute.
   - A screenshot waits unredacted on disk (directory mode 0700) until the
     next `deepmem distill` run.
+
+### Slice 4b: desktop window (done; blocklist not yet observed on a real browser)
+
+- Verified by tests: 13 Rust (9 new): site normalising and matching
+  (subdomains, path prefix, look-alike hosts), rules from `config.toml`,
+  settings saved with comments and unknown keys kept, invalid values refused
+  with nothing written, memory list / search / read, delete refused outside
+  `memories/`, pause toggle, cleanup of rows for a blocked window.
+  20 Python tests still pass; no Python change.
+- Verified in a browser with a stand-in for the Rust side: the page lists,
+  searches, opens and deletes memories (two-click delete), adds and removes
+  sites and apps, shows the Rust side's error text, saves settings, toggles
+  pause. Memory text containing HTML is shown as text.
+- Verified on the real window (temporary home, debug log): the window opens
+  with `--window`, the page's requests reach Rust and the replies reach the
+  page (`memory_get` is only sent after the list reply arrived). While the
+  window was frontmost no event row was written for it.
+- Not verified: the capture loop's blocklist on a real browser. The test
+  binary had no Accessibility permission, so no page address was read. Also
+  not verified by me: Cmd+C / Cmd+V in the window's text fields.
+- Changes from plan:
+  - The newest memory (or best match) opens by itself, so the reading pane
+    is not empty.
+  - "Show in Finder" added, since editing stays in the user's editor.
+  - `toml` crate replaced by `toml_edit` for reading too (one parser).
+  - Once a window is known to show a blocked site it stays blocked until a
+    later read shows another address, so a read that finds no address does
+    not unblock it.
+- Known gap: a page whose address is unknown on the first read can be
+  stored for a moment and is then deleted (see README, Known limits).
+
+### Merge of Slice 4b (window) with Slices 5-7
+
+- The window branch was cut from Slice 4 and merged after Slice 7. Verified:
+  14 Rust and 40 Python tests pass; the merged daemon starts with
+  `--window` in a temporary home. Not verified: the window and the
+  blocked-site rule on the user's real data after the merge.
+- Screenshot settings moved into `config.rs` (`Rules`), so `screenshots`
+  and `screenshot_below_chars` apply without a restart, like the blocklist.
+- No screenshot is taken of a window known to show a blocked site. When a
+  site turns out to be blocked only after rows were written (Chromium gives
+  no URL on its first walk), its screenshots are deleted with those rows.
+- The window does not show the screenshot settings yet; set them in
+  `config.toml`.
