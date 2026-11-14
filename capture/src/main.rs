@@ -11,9 +11,16 @@
 //! Privacy controls (all state lives in ~/.deepmem, override with DEEPMEM_HOME):
 //! - `paused` flag file: while it exists nothing is recorded. Toggled by
 //!   Ctrl+Option+Cmd+P, the menu bar item, or `deepmem pause` / `deepmem resume`.
-//! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded.
+//! - `config.toml`: `denylist = ["App"]` adds apps that are never recorded,
+//!   `url_blocklist = ["site.com"]` websites. Changes apply without a restart.
+//!
+//! The menu bar item opens a window (see `window.rs`) for reading and
+//! deleting memories and for changing these settings.
 
+mod api;
+mod config;
 mod redact;
+mod window;
 
 use accessibility_sys::{
     kAXErrorSuccess, AXError, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
@@ -42,6 +49,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
+use window::Window;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, ptr, thread};
 
@@ -113,6 +121,9 @@ extern "C" {
 /// Set by the shortcut and by the menu bar item; the main loop flips the flag file.
 static TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Set by the menu bar item; the main loop creates or shows the window.
+static OPEN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 extern "C" fn on_hotkey(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
     TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
     0
@@ -153,7 +164,7 @@ fn notify(message: &'static str) {
 // --- menu bar item --------------------------------------------------------
 
 define_class!(
-    // Receives the "Pause capture" menu click.
+    // Receives the menu clicks.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "DeepmemMenuTarget"]
@@ -163,6 +174,11 @@ define_class!(
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
             TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+        }
+
+        #[unsafe(method(openWindow:))]
+        fn open_window(&self, _sender: Option<&AnyObject>) {
+            OPEN_REQUESTED.store(true, Ordering::Relaxed);
         }
     }
 );
@@ -191,11 +207,14 @@ impl MenuBar {
         let state_line = menu_item("", None); // no action: shown greyed out
         let toggle = menu_item("", Some(sel!(togglePause:)));
         unsafe { toggle.setTarget(Some(&target)) };
+        let open = menu_item("Open deep-memory…", Some(sel!(openWindow:)));
+        unsafe { open.setTarget(Some(&target)) };
         let quit = menu_item("Quit deep-memory capture", Some(sel!(terminate:)));
 
         let menu = NSMenu::new(mtm);
         menu.addItem(&state_line);
         menu.addItem(&toggle);
+        menu.addItem(&open);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&quit);
 
@@ -221,38 +240,6 @@ impl MenuBar {
 }
 
 // --- what must never be recorded ------------------------------------------
-
-/// Matched as case-insensitive substrings of the app name.
-const DEFAULT_DENYLIST: [&str; 13] = [
-    "1password", "bitwarden", "lastpass", "dashlane", "keepass", "keychain access",
-    "passwords", "enpass", "proton pass", "nordpass", "keeper", "strongbox",
-    "loginwindow", // lock screen
-];
-
-/// Built-in denylist plus `denylist = [...]` from config.toml. A config file
-/// that cannot be parsed stops the daemon: privacy settings must not be
-/// ignored silently.
-fn load_denylist(home: &Path) -> Vec<String> {
-    let mut list: Vec<String> = DEFAULT_DENYLIST.iter().map(|s| s.to_string()).collect();
-    let path = home.join("config.toml");
-    let Ok(text) = fs::read_to_string(&path) else { return list };
-    match text.parse::<toml::Table>() {
-        Ok(config) => {
-            let extra = config.get("denylist").and_then(|v| v.as_array());
-            list.extend(extra.into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_lowercase));
-        }
-        Err(err) => {
-            eprintln!("deepmem-capture: cannot parse {}: {err}", path.display());
-            process::exit(1);
-        }
-    }
-    list
-}
-
-fn app_denied(app: &str, denylist: &[String]) -> bool {
-    let app = app.to_lowercase();
-    denylist.iter().any(|entry| !entry.is_empty() && app.contains(entry.as_str()))
-}
 
 /// Private browsing windows, recognised by the marker browsers put in the
 /// window title, and the daemon's own terminal window (its log output would
@@ -449,13 +436,13 @@ fn home_dir() -> PathBuf {
     })
 }
 
-fn open_db(home: &Path) -> rusqlite::Result<Connection> {
-    let path = env::var_os("DEEPMEM_DB").map(PathBuf::from).unwrap_or_else(|| home.join("db.sqlite"));
+fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).expect("cannot create database directory");
     }
-    let db = Connection::open(&path)?;
+    let db = Connection::open(path)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
+    db.pragma_update(None, "secure_delete", "ON")?; // deleted rows are overwritten, not just unlinked
     db.busy_timeout(Duration::from_secs(5))?; // the Python side writes its index here too
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
@@ -484,7 +471,6 @@ fn redact_existing_rows(db: &Connection) -> rusqlite::Result<()> {
     if db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= 1 {
         return Ok(());
     }
-    db.pragma_update(None, "secure_delete", "ON")?; // overwrite the old cell contents
     let mut changed = 0;
     {
         let mut frames = db.prepare("SELECT id, title, url, text FROM frames")?;
@@ -520,8 +506,30 @@ fn redact_existing_rows(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Removes what was already stored for the focused window, once it turns
+/// out to show a blocked site. Rows are overwritten (`secure_delete`), and
+/// the WAL, which still holds the old pages, is truncated.
+fn forget_focus(db: &Connection, event: Option<i64>, first_frame: Option<i64>) -> rusqlite::Result<()> {
+    if event.is_none() && first_frame.is_none() {
+        return Ok(());
+    }
+    if let Some(id) = event {
+        db.execute("DELETE FROM events WHERE id = ?1", [id])?;
+    }
+    if let Some(id) = first_frame {
+        // This daemon is the only inserter, so every later frame is from this focus.
+        db.execute("DELETE FROM frames WHERE id >= ?1", [id])?;
+    }
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
 fn main() -> rusqlite::Result<()> {
-    if !unsafe { AXIsProcessTrusted() } {
+    let trusted = unsafe { AXIsProcessTrusted() };
+    if !trusted {
         eprintln!(
             "deepmem-capture: no Accessibility permission, recording app names \
              only (no window titles, no screen text).\nSystem Settings > Privacy \
@@ -535,13 +543,28 @@ fn main() -> rusqlite::Result<()> {
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     ns_app.finishLaunching();
     let menu_bar = MenuBar::new(mtm);
+    window::install_edit_menu(mtm, &ns_app);
 
     let home = home_dir();
     fs::create_dir_all(&home).expect("cannot create deep-memory directory");
-    let denylist = load_denylist(&home);
+    // A config file that cannot be parsed stops the daemon: privacy settings
+    // must not be ignored silently.
+    let config_file = home.join("config.toml");
+    let mut config_modified = modified(&config_file);
+    let mut rules = config::load_rules(&home).unwrap_or_else(|err| {
+        eprintln!("deepmem-capture: {err}");
+        process::exit(1);
+    });
     let paused_flag = home.join("paused");
-    let db = open_db(&home)?;
+    let db_path =
+        env::var_os("DEEPMEM_DB").map(PathBuf::from).unwrap_or_else(|| home.join("db.sqlite"));
+    let db = open_db(&db_path)?;
     let debug = env::var_os("DEEPMEM_DEBUG").is_some();
+    let own_pid = process::id() as i32;
+    let mut window: Option<Window> = None;
+    if env::args().any(|arg| arg == "--window") {
+        OPEN_REQUESTED.store(true, Ordering::Relaxed);
+    }
 
     if register_pause_hotkey() {
         eprintln!("deepmem-capture: Ctrl+Option+Cmd+P pauses and resumes capture");
@@ -558,14 +581,20 @@ fn main() -> rusqlite::Result<()> {
     let mut last_error: AXError = kAXErrorSuccess;
     let mut last_capture = Instant::now() - FALLBACK;
     let mut dedupe = Dedupe::default();
+    // About the focused window: is its focus event still to be written, which
+    // rows it has produced so far, and was it last seen on a blocked site.
+    let mut event_pending = false;
+    let mut focus_event: Option<i64> = None;
+    let mut focus_first_frame: Option<i64> = None;
+    let mut focus_blocked = false;
 
     // ponytail: polls every 250 ms and infers "typing pause / scroll stop /
     // click" from the system idle timer, which needs no extra permission.
     // Switch to AXObserver + event tap only if polling cost shows up in
     // profiles; an event tap needs the Input Monitoring permission.
     loop {
-        // Handle menu clicks and the shortcut for one tick. This also pumps
-        // the main run loop, which NSWorkspace needs to stay current.
+        // Handle menu clicks, the window and the shortcut for one tick. This
+        // also pumps the main run loop, which NSWorkspace needs to stay current.
         let tick_end = NSDate::dateWithTimeIntervalSinceNow(TICK_SECS);
         while let Some(event) = ns_app.nextEventMatchingMask_untilDate_inMode_dequeue(
             NSEventMask::Any,
@@ -574,6 +603,28 @@ fn main() -> rusqlite::Result<()> {
             true,
         ) {
             ns_app.sendEvent(&event);
+        }
+
+        if OPEN_REQUESTED.swap(false, Ordering::Relaxed) {
+            window
+                .get_or_insert_with(|| {
+                    let ctx = api::Context { home: home.clone(), db_path: db_path.clone(), trusted };
+                    Window::new(mtm, ctx)
+                })
+                .show(&ns_app);
+        }
+
+        // Saved from the window or edited by hand: new rules apply at once.
+        let now_modified = modified(&config_file);
+        if now_modified != config_modified {
+            config_modified = now_modified;
+            match config::load_rules(&home) {
+                Ok(new_rules) => rules = new_rules,
+                Err(err) => {
+                    eprintln!("deepmem-capture: {err}");
+                    notify("config.toml has an error. Keeping the previous privacy rules.");
+                }
+            }
         }
 
         if TOGGLE_REQUESTED.swap(false, Ordering::Relaxed) {
@@ -586,8 +637,9 @@ fn main() -> rusqlite::Result<()> {
                 eprintln!("deepmem-capture: cannot change {}: {err}", paused_flag.display());
             }
         }
-        // The flag file is the single source of truth, so the shortcut and the
-        // `deepmem` CLI cannot disagree, and a pause survives a restart.
+        // The flag file is the single source of truth, so the shortcut, the
+        // window and the `deepmem` CLI cannot disagree, and a pause survives
+        // a restart.
         let paused = paused_flag.exists();
         if paused != was_paused {
             menu_bar.set_paused(paused);
@@ -600,7 +652,8 @@ fn main() -> rusqlite::Result<()> {
         }
 
         let Some((app, pid)) = frontmost() else { continue };
-        if app_denied(&app, &denylist) {
+        // Never the daemon's own window: it shows the user's memories.
+        if pid == own_pid || config::app_denied(&app, &rules.denylist) {
             last_focus = None;
             continue; // before any accessibility call into the app
         }
@@ -609,14 +662,14 @@ fn main() -> rusqlite::Result<()> {
             enable_accessibility(&app_ax);
             last_pid = pid;
         }
-        let window = focused_window(&app_ax);
-        if let Err(err) = &window {
+        let window_ax = focused_window(&app_ax);
+        if let Err(err) = &window_ax {
             if *err != last_error {
                 eprintln!("deepmem-capture: no focused window for {app} (AXError {err})");
                 last_error = *err;
             }
         }
-        let title = window.as_ref().map(window_title).unwrap_or_default();
+        let title = window_ax.as_ref().map(window_title).unwrap_or_default();
         if window_denied(&title) {
             last_focus = None;
             continue;
@@ -626,34 +679,51 @@ fn main() -> rusqlite::Result<()> {
         let focus_changed = focus != last_focus;
         let (app, title) = focus.as_ref().unwrap();
         if focus_changed {
-            db.execute(
-                "INSERT INTO events (ts, app, title) VALUES (?1, ?2, ?3)",
-                (now_ms(), app, title),
-            )?;
+            event_pending = true;
+            focus_event = None;
+            focus_first_frame = None;
+            focus_blocked = false;
         }
 
         let idle = idle_secs();
         let since_capture = last_capture.elapsed();
         let input_settled = idle >= SETTLE_SECS && idle < since_capture.as_secs_f64();
         let fallback_due = since_capture >= FALLBACK && idle < AWAY_SECS;
-        if let (Ok(window), true) = (&window, focus_changed || input_settled || fallback_due) {
+        let mut frame: Option<(String, Option<String>, usize)> = None;
+        if let (Ok(window_ax), true) = (&window_ax, focus_changed || input_settled || fallback_due) {
+            // The page's URL is known only after the walk, so nothing about
+            // this window, not even its title, is written before it.
             let mut walker = Walker::new();
-            walker.visit(as_element(window), 0);
+            walker.visit(as_element(window_ax), 0);
             last_capture = Instant::now();
-            let text = redact(&walker.text);
-            let url = walker.url.as_deref().map(redact);
-            if dedupe.is_new(&text) {
+            // A walk that finds no URL (cut short, tree not built yet) does
+            // not change what is known about this window.
+            if let Some(url) = &walker.url {
+                focus_blocked = config::url_blocked(url, &rules.url_blocklist);
+            }
+            frame = Some((redact(&walker.text), walker.url.as_deref().map(redact), walker.nodes));
+        }
+        if focus_blocked {
+            // Chromium reports no URL on its first walk, so rows may exist.
+            forget_focus(&db, focus_event.take(), focus_first_frame.take())?;
+            event_pending = true; // written if the window later shows an allowed page
+        } else {
+            if event_pending && (frame.is_some() || window_ax.is_err()) {
+                db.execute(
+                    "INSERT INTO events (ts, app, title) VALUES (?1, ?2, ?3)",
+                    (now_ms(), app, title),
+                )?;
+                focus_event = Some(db.last_insert_rowid());
+                event_pending = false;
+            }
+            if let Some((text, url, nodes)) = frame.filter(|(text, ..)| dedupe.is_new(text)) {
                 db.execute(
                     "INSERT INTO frames (ts, app, title, url, text) VALUES (?1, ?2, ?3, ?4, ?5)",
                     (now_ms(), app, title, &url, &text),
                 )?;
+                focus_first_frame.get_or_insert(db.last_insert_rowid());
                 if debug {
-                    eprintln!(
-                        "frame: {app}, {} nodes, {} bytes, url: {}",
-                        walker.nodes,
-                        text.len(),
-                        url.is_some()
-                    );
+                    eprintln!("frame: {app}, {nodes} nodes, {} bytes, url: {}", text.len(), url.is_some());
                 }
             }
         }
@@ -666,20 +736,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn denylisted_apps_and_private_windows_are_refused() {
-        let denylist: Vec<String> =
-            DEFAULT_DENYLIST.iter().map(|s| s.to_string()).chain(["signal".to_string()]).collect();
-        assert!(app_denied("1Password 7", &denylist));
-        assert!(app_denied("Keychain Access", &denylist));
-        assert!(app_denied("Signal", &denylist));
-        assert!(!app_denied("Google Chrome", &denylist));
-        assert!(!app_denied("Terminal", &denylist));
-        assert!(!app_denied("Terminal", &["".to_string()]));
-
+    fn private_windows_are_refused() {
         assert!(window_denied("New Tab - Google Chrome (Incognito)"));
         assert!(window_denied("Example — Mozilla Firefox Private Browsing"));
         assert!(window_denied("nithin — deepmem-capture — 80×24"));
         assert!(!window_denied("deep-memory/tasks/todo.md - Google Chrome"));
+    }
+
+    #[test]
+    fn a_blocked_window_loses_the_rows_already_written_for_it() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE frames (id INTEGER PRIMARY KEY, text TEXT);
+             INSERT INTO events (title) VALUES ('editor'), ('My Bank');
+             INSERT INTO frames (text) VALUES ('code'), ('loading'), ('balance');",
+        )
+        .unwrap();
+        let rows = |table: &str| -> Vec<i64> {
+            let mut query = db.prepare(&format!("SELECT id FROM {table} ORDER BY id")).unwrap();
+            let ids = query.query_map([], |row| row.get(0)).unwrap();
+            ids.map(Result::unwrap).collect()
+        };
+        forget_focus(&db, None, None).unwrap();
+        assert_eq!((rows("events"), rows("frames")), (vec![1, 2], vec![1, 2, 3]));
+        forget_focus(&db, Some(2), Some(2)).unwrap();
+        assert_eq!((rows("events"), rows("frames")), (vec![1], vec![1]));
     }
 
     #[test]
