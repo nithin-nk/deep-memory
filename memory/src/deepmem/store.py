@@ -1,21 +1,45 @@
-"""Access to the deep-memory SQLite file: redaction, search index, queries,
-and deletion.
+"""Access to deep-memory's data: configuration, redaction, search indexes,
+queries, and deletion.
 
 deepmem-capture is the only process that inserts into the raw tables
 (`events`, `frames`). This module reads them, owns the search index, and
 deletes rows only when the user asks to forget.
 """
 
+import json
 import os
 import re
 import sqlite3
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path(os.environ.get("DEEPMEM_HOME", Path.home() / ".deepmem"))
 DB = Path(os.environ.get("DEEPMEM_DB", HOME / "db.sqlite"))
 PAUSED_FLAG = HOME / "paused"
+CONFIG_FILE = HOME / "config.toml"
+
+CONFIG_DEFAULTS = {
+    "model": "qwen3-vl:8b-instruct",  # non-thinking build; any Ollama model; a multimodal one also serves Slice 7
+    "ollama_url": "http://localhost:11434",
+    "num_ctx": 16384,  # Ollama's own default is far smaller and silently truncates
+    "session_gap_minutes": 5,  # idle time that ends a session
+    "session_max_minutes": 30,
+    "distill_on_battery": False,
+}
+
+
+def load_config(path: Path | None = None) -> dict:
+    """Defaults overlaid with `~/.deepmem/config.toml` (shared with the daemon,
+    which reads `denylist` from it)."""
+    path = path or CONFIG_FILE
+    config = dict(CONFIG_DEFAULTS)
+    if path.exists():
+        with path.open("rb") as file:
+            config.update({k: v for k, v in tomllib.load(file).items() if k in CONFIG_DEFAULTS})
+    return config
+
 
 # The index stores redacted text. Change the name whenever redaction rules
 # change, so the old index is dropped and rebuilt from `frames`.
@@ -74,7 +98,7 @@ def redact(text: str) -> str:
 # --- reading ----------------------------------------------------------------
 
 
-def _iso(ts_ms: int) -> str:
+def iso(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
@@ -91,7 +115,7 @@ def recent_events(db: Path = DB, limit: int = 20) -> list[dict]:
         return []
     finally:
         con.close()
-    return [{"time": _iso(ts), "app": app, "title": redact(title)} for ts, app, title in rows]
+    return [{"time": iso(ts), "app": app, "title": redact(title)} for ts, app, title in rows]
 
 
 def sync_index(con: sqlite3.Connection) -> None:
@@ -115,6 +139,53 @@ def sync_index(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def get_meta(con: sqlite3.Connection, key: str) -> str | None:
+    con.execute("CREATE TABLE IF NOT EXISTS deepmem_meta (key TEXT PRIMARY KEY, value TEXT)")
+    row = con.execute("SELECT value FROM deepmem_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(con: sqlite3.Connection, key: str, value) -> None:
+    con.execute("CREATE TABLE IF NOT EXISTS deepmem_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT OR REPLACE INTO deepmem_meta (key, value) VALUES (?, ?)", (key, str(value)))
+
+
+def read_memory(path: Path) -> tuple[dict, str]:
+    """(front matter, body) of a memory file. Front matter values are JSON."""
+    text = path.read_text(encoding="utf-8")
+    front: dict = {}
+    if text.startswith("---\n") and "\n---\n" in text[4:]:
+        header, text = text[4:].split("\n---\n", 1)
+        for line in header.splitlines():
+            key, _, value = line.partition(": ")
+            try:
+                front[key] = json.loads(value)
+            except json.JSONDecodeError:
+                front[key] = value  # hand-edited, not JSON: keep as text
+    return front, text.strip()
+
+
+def sync_memory_index(con: sqlite3.Connection, memories: Path) -> None:
+    """Rebuild the memory index when any Markdown file was added, edited or
+    removed. The files are the source of truth; users may edit them."""
+    # ponytail: full rebuild on any change; index per file if this gets slow
+    # (thousands of files).
+    files = sorted(memories.rglob("*.md")) if memories.exists() else []
+    signature = f"{len(files)}:{max((f.stat().st_mtime_ns for f in files), default=0)}"
+    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(body, path UNINDEXED, start UNINDEXED)")
+    if get_meta(con, "memories_signature") == signature:
+        return
+    con.execute("DELETE FROM memories_fts")
+    for file in files:
+        front, body = read_memory(file)
+        con.execute(
+            "INSERT INTO memories_fts (body, path, start) VALUES (?, ?, ?)",
+            (redact(body), str(file), str(front.get("start", ""))),
+        )
+    set_meta(con, "memories_signature", signature)
+    con.commit()
+
+
 def _match_expression(query: str) -> str:
     """Turn free text into an FTS5 query: every word must appear. Quoting each
     word keeps punctuation in user input from being read as FTS5 syntax."""
@@ -122,36 +193,47 @@ def _match_expression(query: str) -> str:
 
 
 def search(query: str, limit: int = 10, db: Path = DB) -> list[dict]:
-    """Best-matching captured screen text, one result per window."""
+    """Distilled memories first, then raw screen text (one result per window)."""
     match = _match_expression(query)
     if not match or not db.exists():
         return []
     limit = max(1, min(limit, 50))
     con = sqlite3.connect(db, timeout=5)
     try:
-        sync_index(con)
-        rows = con.execute(
-            f"SELECT ts, app, title, url, snippet({INDEX}, 0, '', '', ' … ', 40) "
-            f"FROM {INDEX} WHERE {INDEX} MATCH ? ORDER BY rank, ts DESC LIMIT ?",
-            # The same window is captured many times; over-fetch, then keep one each.
-            (match, limit * 10),
+        sync_memory_index(con, db.parent / "memories")
+        memory_rows = con.execute(
+            "SELECT start, path, snippet(memories_fts, 0, '', '', ' … ', 60) "
+            "FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
+            (match, limit),
         ).fetchall()
-    except sqlite3.OperationalError:  # capture has not created `frames` yet
-        return []
+        try:
+            sync_index(con)
+            frame_rows = con.execute(
+                f"SELECT ts, app, title, url, snippet({INDEX}, 0, '', '', ' … ', 40) "
+                f"FROM {INDEX} WHERE {INDEX} MATCH ? ORDER BY rank, ts DESC LIMIT ?",
+                # The same window is captured many times; over-fetch, then keep one each.
+                (match, limit * 10),
+            ).fetchall()
+        except sqlite3.OperationalError:  # capture has not created `frames` yet
+            frame_rows = []
     finally:
         con.close()
 
-    results, seen = [], set()
-    for ts, app, title, url, snippet in rows:
+    results = [
+        {"kind": "memory", "time": start, "snippet": snippet, "file": path}
+        for start, path, snippet in memory_rows
+    ]
+    seen = set()
+    for ts, app, title, url, snippet in frame_rows:
+        if len(results) >= limit:
+            break
         if (app, title) in seen:
             continue
         seen.add((app, title))
-        result = {"time": _iso(ts), "app": app, "title": title, "snippet": snippet}
+        result = {"kind": "screen", "time": iso(ts), "app": app, "title": title, "snippet": snippet}
         if url:
             result["url"] = url
         results.append(result)
-        if len(results) == limit:
-            break
     return results
 
 
@@ -159,8 +241,8 @@ def search(query: str, limit: int = 10, db: Path = DB) -> list[dict]:
 
 
 def forget(seconds: float | None, db: Path = DB) -> int:
-    """Delete captured data from the last `seconds` (None = everything).
-    Returns the number of raw rows deleted."""
+    """Delete captured data and the memories distilled from it, for the last
+    `seconds` (None = everything). Returns the number of rows and files deleted."""
     if not db.exists():
         return 0
     cutoff = 0 if seconds is None else int((time.time() - seconds) * 1000)
@@ -178,6 +260,23 @@ def forget(seconds: float | None, db: Path = DB) -> int:
         # by rowid if rebuilds get slow.
         for index in (INDEX, *_OLD_INDEXES):
             con.execute(f"DROP TABLE IF EXISTS {index}")
+        # Memories distilled from that period go too.
+        memories = db.parent / "memories"
+        for file in memories.rglob("*.md") if memories.exists() else []:
+            end = read_memory(file)[0].get("end")
+            try:
+                expired = seconds is None or datetime.fromisoformat(str(end)).timestamp() * 1000 >= cutoff
+            except ValueError:
+                expired = seconds is None  # no readable date: only `--all` removes it
+            if expired:
+                file.unlink()
+                deleted += 1
+        # Row ids restart after a full delete; keep the distiller's cursor valid.
+        try:
+            newest = con.execute("SELECT coalesce(max(id), 0) FROM frames").fetchone()[0]
+            set_meta(con, "distilled_frame_id", min(int(get_meta(con, "distilled_frame_id") or 0), newest))
+        except sqlite3.OperationalError:
+            pass
         con.commit()
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the WAL still held the old pages
     finally:
@@ -203,5 +302,5 @@ def stats(db: Path = DB) -> dict:
     finally:
         con.close()
     if result["last_capture"]:
-        result["last_capture"] = _iso(result["last_capture"])
+        result["last_capture"] = iso(result["last_capture"])
     return result

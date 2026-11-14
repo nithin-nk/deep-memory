@@ -4,8 +4,9 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 
-from deepmem import store
+from deepmem import distill, store
 
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -28,11 +29,14 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("pause", help="stop recording until `deepmem resume`")
     commands.add_parser("resume", help="start recording again")
     commands.add_parser("status", help="show capture state and how much is stored")
-    forget = commands.add_parser("forget", help="permanently delete captured data")
+    forget = commands.add_parser("forget", help="permanently delete captured data and memories made from it")
     span = forget.add_mutually_exclusive_group(required=True)
     span.add_argument("--last", type=parse_duration, metavar="DURATION", help="delete the last 30m, 1h, 2d, ...")
     span.add_argument("--all", action="store_true", help="delete everything")
     forget.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    distill_cmd = commands.add_parser("distill", help="turn captured sessions into memories with the local model")
+    distill_cmd.add_argument("--force", action="store_true", help="run even on battery while you are active")
+    distill_cmd.add_argument("--watch", action="store_true", help="keep running, one pass every 5 minutes")
     args = parser.parse_args(argv)
 
     if args.command == "pause":
@@ -63,7 +67,24 @@ def main(argv: list[str] | None = None) -> int:
                 print("Nothing deleted.")
                 return 1
         deleted = store.forget(None if args.all else args.last)
-        print(f"Deleted {deleted} rows.")
+        print(f"Deleted {deleted} rows and memory files.")
+    elif args.command == "distill":
+        config = store.load_config()
+        # ponytail: `--watch` is a sleep loop; launchd takes over in Slice 10.
+        while True:
+            if args.force or distill.allowed_now(config):
+                try:
+                    count = distill.run_once(config=config)
+                    print(f"Wrote {count} episode(s) to {store.DB.parent / 'memories'}.")
+                except distill.ModelUnavailable as err:
+                    print(f"deepmem: {err}", file=sys.stderr)
+                    if not args.watch:
+                        return 1
+            else:
+                print("On battery and in use: skipped. Use --force to run anyway.")
+            if not args.watch:
+                break
+            time.sleep(300)
     return 0
 
 

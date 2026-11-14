@@ -88,18 +88,18 @@ User control is a product promise, so it lands before any model sees data.
 
 The core of the product.
 
-- [ ] Python: sessionizer groups frames/events into sessions by app, window
+- [x] Python: sessionizer groups frames/events into sessions by app, window
       and a time gap (configurable, default 5 minutes idle). No model.
-- [ ] Python: for each closed session, call Ollama with a JSON-schema
+- [x] Python: for each closed session, call Ollama with a JSON-schema
       response format and produce an episode: summary, what was done,
       decisions, open items, entities (files, URLs, repos), time range.
       Validate the JSON; retry once; drop on second failure and log it.
-- [ ] Set `num_ctx` explicitly; chunk sessions that exceed it.
-- [ ] Write each episode as Markdown with front matter (time range, source
+- [x] Set `num_ctx` explicitly; chunk sessions that exceed it.
+- [x] Write each episode as Markdown with front matter (time range, source
       session id, apps). Index episodes in FTS5.
-- [ ] `recall` searches episodes first, raw frames second.
-- [ ] Runs on a timer, only when on power or idle (config flag to override).
-- [ ] Prompt treats captured text as untrusted data; episodes record facts
+- [x] `recall` searches episodes first, raw frames second.
+- [x] Runs on a timer, only when on power or idle (config flag to override).
+- [x] Prompt treats captured text as untrusted data; episodes record facts
       about what the user did, never instructions found on screen.
 - **Done when:** after one hour of normal work, `~/.deepmem/memories/`
   contains readable episode files and `recall` returns them. A test runs the
@@ -305,3 +305,60 @@ scores.)
   `RunCurrentEventLoop`. Process-level smoke test passes; the user confirmed the menu bar item
   and the shortcut both work. Cause of the
   reported shortcut failure was not reproduced.
+
+### Slice 4 (done; verified on real captures with a real local model)
+
+- Verified: 20 Python tests pass (9 new): session splitting, compaction,
+  episode file content, open sessions left alone, retry then drop, model
+  outage leaves the session for later, secrets never in prompt or file,
+  remote `ollama_url` refused, memory-first recall, edited files reindexed,
+  forget removes memories.
+- Not verified: output of a real model. Ollama is not installed on the
+  development machine; installing it and pulling a 6.2 GB model needs the
+  user's go-ahead. The "Done when" check (readable episodes after real work)
+  is therefore still open, and episode quality is unknown.
+- Changes from plan:
+  - Sessions split on time only (idle gap, 30 minute cap), not per app or
+    window: one piece of work moves between browser, editor and terminal.
+    Inside a session, text is grouped per window.
+  - Compaction before the model: repeated captures of a window are merged
+    to unique lines, and partial lines from typing or streaming are dropped.
+    Without this the real data (124 captures of one chat window, 1.2 MB)
+    would not fit any context.
+  - A session too large for the context is split into parts, one episode
+    file per part.
+  - Episodes go to `memories/_unsorted/` until Slice 6 assigns projects.
+  - The memory index is rebuilt whenever any memory file changes, so user
+    edits and deletions are picked up without a watcher.
+  - "Timer" is `deepmem distill --watch` (sleep loop) for now; launchd in
+    Slice 10.
+  - `forget` also deletes memories whose time range falls in the period.
+  - `loginwindow` (lock screen) added to the daemon's built-in denylist.
+- Model: `qwen3-vl:8b` confirmed on ollama.com (6.2 GB). It is a thinking
+  model; requests set `think: false`.
+- First real runs (Ollama 0.40.16, `qwen3-vl:8b`, 100% GPU, ~40 tokens/s):
+  - One real episode was produced from 15 minutes of activity in about 2
+    minutes: specific and mostly accurate (commands, commit hashes, URLs),
+    but its "Decisions" section listed actions, not decisions.
+  - `qwen3-vl:8b` is the thinking build. It ignores `think: false` and the
+    `/no_think` switch, puts 1,000+ tokens into hidden reasoning before any
+    answer, and once ran past 4,000 tokens. With the reply capped at 1,500
+    tokens every reply came back empty and all sessions were dropped.
+  - Added: reply cap (`num_predict` 1500) and `maxItems` 10 per list.
+  - Fixed by switching the default to `qwen3-vl:8b-instruct` (non-thinking
+    build, 6.2 GB). Tiny prompt: valid JSON in 3 s. Real data: 30 minutes of
+    activity (320 frames) became 3 episodes in 65 s.
+- "Done when" met: readable episode files exist in `~/.deepmem/memories/`
+  and `recall` returns them before raw screen text.
+- Episode quality with the instruct model, read by hand:
+  - Good: specific and mostly correct (commands, test counts, model names,
+    open items such as "old daemon still running").
+  - Wrong details seen: an invented branch name, a flag attributed to the
+    wrong behaviour. Small-model errors; Slice 5 must measure their rate.
+  - Speculative wording ("likely", "suggesting") appeared once; a stricter
+    prompt rule removed it in the rerun.
+  - Parts of one session are grouped by window, so they overlap in time and
+    all carry the session's whole frame range.
+  - Personal browsing becomes a memory like anything else. Slice 6 must keep
+    it out of project-scoped recall.
+- The thinking build `qwen3-vl:8b` is still on disk, unused (6.2 GB).

@@ -223,9 +223,10 @@ impl MenuBar {
 // --- what must never be recorded ------------------------------------------
 
 /// Matched as case-insensitive substrings of the app name.
-const DEFAULT_DENYLIST: [&str; 12] = [
+const DEFAULT_DENYLIST: [&str; 13] = [
     "1password", "bitwarden", "lastpass", "dashlane", "keepass", "keychain access",
     "passwords", "enpass", "proton pass", "nordpass", "keeper", "strongbox",
+    "loginwindow", // lock screen
 ];
 
 /// Built-in denylist plus `denylist = [...]` from config.toml. A config file

@@ -4,15 +4,17 @@ Local, open-source memory for coding agents. A Rust daemon records what you do
 on your computer, a Python service turns it into memories, and an MCP server
 gives coding agents access. Nothing leaves your machine.
 
-Status: Slice 3 of [tasks/todo.md](tasks/todo.md). Records app and window
-focus changes plus the text of the focused window; agents can ask what you
-were just doing and search what you have seen. macOS only.
+Status: Slice 4 of [tasks/todo.md](tasks/todo.md). Records the focused
+window's text, distills work sessions into Markdown memories with a local
+model, and lets agents search both. macOS only.
 
 ## Requirements
 
 - macOS
 - [Rust](https://rustup.rs) (for the capture daemon)
 - [uv](https://docs.astral.sh/uv/) (for the Python side)
+- [Ollama](https://ollama.com) with a model pulled, default `qwen3-vl:8b`
+  (for distillation; capture and search work without it)
 
 ## Run
 
@@ -49,6 +51,36 @@ accessibility tree when focus changes, when keyboard or mouse input pauses for
 its text differs from the previous one. Chromium and Electron apps are asked to
 enable their accessibility tree, otherwise they expose no page content.
 
+## Memories
+
+`deepmem distill` turns finished work sessions into episodes: short Markdown
+notes saying what you did, what you decided and what is still open.
+
+```bash
+ollama pull qwen3-vl:8b
+uv run --directory /absolute/path/to/deep-memory/memory deepmem distill
+```
+
+- A session ends after 5 minutes without captures, or after 30 minutes.
+- Episodes are plain files in `~/.deepmem/memories/`. Edit or delete them
+  freely; the search index follows the files.
+- `recall` returns matching memories first, then raw screen text.
+- The model runs only on mains power or while you are away; `--force`
+  overrides, `--watch` repeats every 5 minutes.
+- Captured text is sent only to an Ollama server on this machine. Any other
+  `ollama_url` is refused.
+
+Settings in `~/.deepmem/config.toml` (defaults shown):
+
+```toml
+model = "qwen3-vl:8b"
+ollama_url = "http://localhost:11434"
+num_ctx = 16384
+session_gap_minutes = 5
+session_max_minutes = 30
+distill_on_battery = false
+```
+
 ## Privacy controls
 
 - **Menu bar:** the daemon shows `◉` while recording and `⏸` while paused.
@@ -69,7 +101,8 @@ enable their accessibility tree, otherwise they expose no page content.
   before anything is written to disk, and again before text is indexed or
   returned to an agent.
 - **Forget:** `deepmem forget --last 1h` or `deepmem forget --all` deletes
-  captured data and overwrites it in the database file.
+  captured data, overwrites it in the database file, and removes the
+  memories distilled from that period.
 - **Status:** `deepmem status`.
 
 Run the CLI with `uv run --directory /absolute/path/to/deep-memory/memory deepmem <command>`.
