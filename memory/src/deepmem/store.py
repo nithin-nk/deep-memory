@@ -3,7 +3,7 @@ queries, and deletion.
 
 deepmem-capture is the only process that inserts into the raw tables
 (`events`, `frames`). This module reads them, owns the search index, and
-deletes rows only when the user asks to forget.
+deletes rows only when the user asks to forget and for retention.
 """
 
 import json
@@ -32,6 +32,8 @@ CONFIG_DEFAULTS = {
     "share_personal": False,  # may agents inside a project also read `personal` memories?
     "outside_project": "none",  # what an agent outside any repository reads: none | personal | all
     "keep_screenshots": False,  # keep the JPEG (in frames/kept/) after the vision model described it
+    "retain_frames_days": 7,  # raw captures older than this are deleted once distilled; 0 keeps them
+    "retain_episodes_days": 90,  # episodes older than this are deleted once consolidated; 0 keeps them
 }
 
 
@@ -54,6 +56,13 @@ _LABEL_BUCKET_MS = 30 * 60 * 1000
 # A frame whose screenshot the vision model has not described yet. Described
 # frames have `image` NULL, or `kept/<file>` with `keep_screenshots`.
 PENDING_SHOT = "image IS NOT NULL AND image NOT LIKE 'kept/%'"
+# Durable memories (written by `consolidate`): one bullet per fact, ending in
+# its source episodes and the date it was last confirmed. A line ending in
+# PINNED belongs to the user.
+DURABLE = ("facts.md", "preferences.md")
+PINNED = "(pinned)"
+FACT_TAIL = re.compile(r" \(sources: ([^()]*); confirmed: (\d{4}-\d{2}-\d{2})\)(?: \(pinned\))?\s*$")
+CONSOLIDATED = "consolidated:"  # + project directory: meta key, name of its newest consolidated episode
 
 
 # --- redaction --------------------------------------------------------------
@@ -324,10 +333,12 @@ def forget(seconds: float | None, db: Path = DB) -> int:
         # ponytail: drop the whole index instead of deleting matching entries;
         # it is rebuilt from the remaining frames on the next search. Delete
         # by rowid if rebuilds get slow.
-        for index in (INDEX, *_OLD_INDEXES):
+        for index in (INDEX, *_OLD_INDEXES, "memories_fts_v2"):
             con.execute(f"DROP TABLE IF EXISTS {index}")
+        set_meta(con, "memories_signature_v2", "forgotten")  # the memory index holds copies of the files
         # Memories distilled from that period go too.
         memories = db.parent / "memories"
+        forgotten = set()  # (directory, name) of the episodes deleted here
         for file in memories.rglob("*.md") if memories.exists() else []:
             end = read_memory(file)[0].get("end")
             try:
@@ -335,8 +346,34 @@ def forget(seconds: float | None, db: Path = DB) -> int:
             except ValueError:
                 expired = seconds is None  # no readable date: only `--all` removes it
             if expired:
+                forgotten.add((file.parent, file.stem))
                 file.unlink()
                 deleted += 1
+
+        def in_period(directory: Path, source: str) -> bool:
+            if (directory, source) in forgotten:
+                return True
+            try:  # an episode retention already deleted: its name is its start time
+                return datetime.strptime(source[:17], "%Y-%m-%dT%H%M%S").timestamp() * 1000 >= cutoff
+            except ValueError:
+                return False
+
+        # Durable files have no time range; their facts point at episodes. A
+        # fact resting only on forgotten episodes goes, pinned or not. Lines
+        # without sources (written by hand) stay until `--all`.
+        for file in memories.glob("*/*.md") if memories.exists() else []:
+            if file.name not in DURABLE:
+                continue
+            lines = file.read_bytes().decode("utf-8").split("\n")  # bytes: keep the user's line endings
+            kept = []
+            for line in lines:
+                tail = FACT_TAIL.search(line)
+                sources = [s.strip() for s in tail.group(1).split(",") if s.strip()] if tail else []
+                if not sources or not all(in_period(file.parent, s) for s in sources):
+                    kept.append(line)
+            if len(kept) < len(lines):
+                file.write_bytes("\n".join(kept).encode("utf-8"))
+                deleted += len(lines) - len(kept)
         # Screenshots, described or not. By file time, so that one whose row
         # is already gone is removed too.
         shots = db.parent / "frames"
@@ -360,6 +397,65 @@ def forget(seconds: float | None, db: Path = DB) -> int:
             pass
         con.commit()
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the WAL still held the old pages
+    finally:
+        con.close()
+    return deleted
+
+
+def retain(db: Path = DB, config: dict | None = None, now: float | None = None) -> int:
+    """Delete what is older than the retention periods and already used:
+    frames (with their events, index entries and screenshots) once distilled,
+    episodes once consolidated. Durable files stay; their facts keep the names
+    of deleted episodes. Returns the number of rows and files deleted."""
+    config = config or load_config()
+    now = now or time.time()
+    if not db.exists():
+        return 0
+    deleted = 0
+    con = sqlite3.connect(db, timeout=5)
+    try:
+        con.execute("PRAGMA secure_delete = ON")
+        days = config["retain_frames_days"]
+        try:
+            cursor = int(get_meta(con, "distilled_frame_id") or 0)
+            # Nothing from the first undistilled frame on, however old.
+            pending = con.execute("SELECT min(ts) FROM frames WHERE id > ?", (cursor,)).fetchone()[0]
+        except sqlite3.OperationalError:  # capture has not created `frames` yet
+            days = 0
+        if days > 0:
+            edge = int((now - days * 86400) * 1000)
+            edge = edge if pending is None else min(edge, pending)
+            old = "FROM frames WHERE ts < ? AND id <= ?"
+            try:
+                # Without this FTS5 leaves the deleted words in its index pages.
+                con.execute(f"INSERT INTO {INDEX} ({INDEX}, rank) VALUES ('secure-delete', 1)")
+                con.execute(f"DELETE FROM {INDEX} WHERE rowid IN (SELECT id {old})", (edge, cursor))
+            except sqlite3.OperationalError:  # nothing indexed yet
+                pass
+            deleted += con.execute(f"DELETE {old}", (edge, cursor)).rowcount
+            try:
+                deleted += con.execute("DELETE FROM events WHERE ts < ?", (edge,)).rowcount
+            except sqlite3.OperationalError:
+                pass
+            shots = db.parent / "frames"
+            for file in shots.rglob("*.jpg") if shots.exists() else []:  # waiting and kept/
+                if file.stat().st_mtime * 1000 < edge:
+                    file.unlink()
+                    deleted += 1
+        days = config["retain_episodes_days"]
+        memories = db.parent / "memories"
+        for file in memories.glob("*/*.md") if days > 0 and memories.exists() else []:
+            front = read_memory(file)[0]
+            if front.get("type") != "episode" or file.stem > (get_meta(con, CONSOLIDATED + file.parent.name) or ""):
+                continue  # not an episode, or not consolidated yet
+            try:
+                if datetime.fromisoformat(str(front.get("end"))).timestamp() < now - days * 86400:
+                    file.unlink()
+                    deleted += 1
+            except ValueError:  # no readable date: keep
+                pass
+        con.commit()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         con.close()
     return deleted

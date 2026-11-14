@@ -152,16 +152,16 @@ Without this, later slices cannot show they improve anything.
 
 ## Slice 8: Consolidation and retention
 
-- [ ] Nightly job merges episodes into durable per-project files:
+- [x] Nightly job merges episodes into durable per-project files:
       `facts.md` (project state, decisions), `preferences.md` (how the user
       works). The model receives the existing file plus new episodes and
       returns the full updated file, so stale facts are replaced, not
       appended.
-- [ ] Every fact keeps a pointer to its source episodes and a last-confirmed
+- [x] Every fact keeps a pointer to its source episodes and a last-confirmed
       date.
-- [ ] Retention: delete raw frames after N days (default 7), episodes after
+- [x] Retention: delete raw frames after N days (default 7), episodes after
       M days (default 90). Durable files stay.
-- [ ] User edits to Markdown files are respected: reindex on file change;
+- [x] User edits to Markdown files are respected: reindex on file change;
       the consolidator never overwrites a line the user marked as pinned.
 - **Done when:** a fixture with a contradicting later episode yields one
   updated fact, not two; a test covers retention and pinning.
@@ -492,3 +492,85 @@ scores.)
   - A video in a text-less window costs one model call per minute.
   - A screenshot waits unredacted on disk (directory mode 0700) until the
     next `deepmem distill` run.
+
+### Slice 8 (done; real-model run on a copy, not on the live memories)
+
+- Verified: 50 Python tests pass (10 new, `tests/test_consolidate.py`),
+  all with a stubbed model. "Done when" met: a later episode that
+  contradicts a fact yields one updated fact, not two. Also covered:
+  unmentioned facts, pinned lines, prose and `\r\n` endings are written back
+  byte for byte; a pinned line has no number the model could target; an
+  unusable reply is retried once, then the files stay unchanged and the
+  episodes are sent again next run; a reply naming an episode that was not
+  sent or a fact that does not exist is refused whole; batches of 6
+  episodes; secrets redacted in prompt and file; the two files are found by
+  `recall` only inside their project and reindexed after an edit; retention
+  of frames (with events, index entries, screenshots waiting and kept; the
+  deleted text is gone from the database file bytes) and of episodes;
+  `forget`; the `consolidate` command and the once-a-day run of
+  `distill --watch`.
+- Verified with the real model (`qwen3-vl:8b-instruct`) on a copy of the 11
+  real episodes in a temporary directory: 3 calls, 16.6 s, every reply
+  valid. Result read by hand: 12 entries (7 facts and 1 preference for
+  `deep-memory`, 4 entries for `Desktop`, none for `personal`). Most are
+  correct and durable (database path, redaction in the daemon, pause
+  shortcut, menu bar item, commit message format). Wrong or weak: "Evaluation
+  harnesses require 15 evaluation questions for each slice" (a
+  generalisation of one open item), "was tested with real windows" (an
+  activity), two overlapping `Desktop` entries about reply limits, and the
+  `Desktop` entry names `qwen3-vl:8b` although the same episode says the
+  instruct build was chosen.
+- Verified with the real model, contradiction: a synthetic later episode
+  (new pause shortcut, new database path, a `uv` command) was added to the
+  copy, plus a pinned line about `uv`. One call, 2.3 s: two `replace`
+  operations on the right facts, 7 facts before and after, nothing added for
+  the pinned subject.
+- The first prompt version was worse: 29 entries from the same episodes,
+  many of them activities ("The user ran distillation on the first 15
+  minutes") and 9 about personal browsing habits. The prompt now lists what
+  is not an entry and tells the model that `personal` has no project facts.
+- Not verified: the live `~/.deepmem/memories` (no durable files were
+  written there; run `deepmem consolidate` to create them); retention on
+  the live database (the first daily run deletes distilled frames older
+  than 7 days); many days of episodes against a grown facts file; `remove`
+  and `confirm` from the real model; the watch loop over a real day. Rust
+  tests were not rerun (no Rust change).
+- Decisions made by the agent; the user approved the design without
+  answering these three questions:
+  - Operations instead of a full rewrite. The plan said the model returns
+    the whole updated file. It returns add / replace / confirm / remove
+    against numbered facts, and the code renders the Markdown, because the
+    8B model drops content when it rewrites (Slice 5 review).
+  - The pin marker is `(pinned)` at the end of a line.
+  - `preferences.md` stays per project, as in the plan; there is no global
+    preferences file.
+- Other changes from plan:
+  - The cursor (`consolidated:<project>` in `deepmem_meta`) is the name of
+    the newest consolidated episode per project directory.
+  - Last-confirmed is the date of the newest source episode, not the day
+    the job ran. A fact lists its last 5 sources. `replace` keeps only the
+    new sources.
+  - Lines that are not bullets are left alone and not shown to the model.
+    The model's own repeat of an existing fact counts as a confirm.
+  - Retention deletes frames only up to the first undistilled frame,
+    events up to the same time, screenshots by file time. `0` days keeps
+    everything.
+  - "Nightly" is once per 24 hours inside `distill --watch`; launchd is
+    Slice 10. `deepmem consolidate` ignores the power rule (run by hand).
+  - `forget --last` removes a fact when all its sources are in the period,
+    also when the line is pinned; a source already deleted by retention is
+    dated by its name. A fact with one older source stays, with its text.
+  - Fixed on the way (gap from Slice 4): `forget` left the text of deleted
+    memories in the memory index inside the database file. It now drops
+    that index under secure delete; a test checks the bytes.
+- Known limits:
+  - A batch that gets two unusable replies blocks its project until a later
+    run succeeds; the episodes are kept meanwhile.
+  - Every existing fact is sent on every call; a file with hundreds of
+    facts will not fit the context.
+  - An episode moved by hand into a project whose cursor is already past
+    its date is never consolidated.
+  - The model still stores some activities and wrong generalisations.
+    There is no eval for consolidation yet; `deepmem eval` measures
+    episodes and recall only.
+  - `Desktop` and `personal` get durable files like any project.

@@ -8,7 +8,7 @@ import time
 
 from pathlib import Path
 
-from deepmem import distill, evaluate, store, vision
+from deepmem import consolidate, distill, evaluate, store, vision
 
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -25,6 +25,11 @@ def _daemon_running() -> bool:
     return subprocess.run(["pgrep", "-x", "deepmem-capture"], capture_output=True).returncode == 0
 
 
+def _consolidate(config: dict) -> None:
+    changed, deleted = consolidate.run(config=config)
+    print(f"Consolidated {changed} fact change(s); retention deleted {deleted} old rows and files.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="deepmem", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -39,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     distill_cmd = commands.add_parser("distill", help="turn captured sessions into memories with the local model")
     distill_cmd.add_argument("--force", action="store_true", help="run even on battery while you are active")
     distill_cmd.add_argument("--watch", action="store_true", help="keep running, one pass every 5 minutes")
+    commands.add_parser("consolidate", help="merge episodes into facts.md and preferences.md, then delete old captures and episodes")
     export = commands.add_parser("export-fixture", help="freeze captured frames into a file for `deepmem eval`")
     export.add_argument("--last", type=parse_duration, metavar="DURATION", help="only the last 30m, 1h, 2d, ... (default: all)")
     export.add_argument("--out", type=Path, default=evaluate.FIXTURE, help=f"default: {evaluate.FIXTURE}")
@@ -89,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"Described {described} screenshot(s).")
                     count = distill.run_once(config=config)
                     print(f"Wrote {count} episode(s) to {store.DB.parent / 'memories'}.")
+                    if args.watch and consolidate.due():  # once a day, under the same power/idle rule
+                        _consolidate(config)
                 except distill.ModelUnavailable as err:
                     print(f"deepmem: {err}", file=sys.stderr)
                     if not args.watch:
@@ -98,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
             if not args.watch:
                 break
             time.sleep(300)
+    elif args.command == "consolidate":
+        try:
+            _consolidate(store.load_config())
+        except distill.ModelUnavailable as err:
+            print(f"deepmem: {err}", file=sys.stderr)
+            return 1
     elif args.command == "export-fixture":
         count = evaluate.export_fixture(args.out, args.last)
         print(f"Wrote {count} frames to {args.out}. The file holds captured screen text: keep it private.")

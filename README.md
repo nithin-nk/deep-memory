@@ -116,6 +116,53 @@ session_max_minutes = 30
 distill_on_battery = false
 ```
 
+## Durable memories and retention
+
+Episodes say what happened in one session. `deepmem consolidate` merges
+them into two files per project that hold what stays true:
+
+- `memories/<project>/facts.md`: the state of the project and its decisions.
+- `memories/<project>/preferences.md`: how you work.
+
+```bash
+uv run --directory /absolute/path/to/deep-memory/memory deepmem consolidate
+```
+
+One bullet is one fact, with the episodes it comes from and the day it was
+last confirmed:
+
+```markdown
+- The default model is qwen3-vl:8b-instruct. (sources: 2026-11-14T101005; confirmed: 2026-11-14)
+- Deploys go through Jenkins, never by hand (pinned)
+```
+
+- The model sees the existing facts and the new episodes and answers with
+  changes (add, replace, confirm, remove). When a later episode contradicts
+  a fact, the fact is replaced, not joined by a second one. A fact the model
+  does not mention stays as it is.
+- The files are yours to edit. End a line with `(pinned)` and the
+  consolidator never changes or removes it. A bullet you write without
+  sources is kept until an episode contradicts it. Lines that are not
+  bullets (headings, prose) are never touched.
+- `recall` finds these files like episodes, within the same project.
+- `deepmem distill --watch` runs the same job once a day, under the same
+  power rule as distillation. `deepmem consolidate` itself runs at once.
+- An unusable model reply is retried once. After that the files stay
+  unchanged and the episodes wait for the next run.
+
+The same job applies retention (`~/.deepmem/config.toml`, defaults shown,
+`0` keeps everything):
+
+```toml
+retain_frames_days = 7      # raw screen text, focus events, screenshots
+retain_episodes_days = 90
+```
+
+Raw captures are deleted only after they were distilled, episodes only after
+they were consolidated. `facts.md` and `preferences.md` are never deleted by
+retention; a fact keeps the name of its source episode after that episode is
+gone.
+
 ## Projects and who can read what
 
 A project is a git repository on this machine, named by its directory.
@@ -196,7 +243,10 @@ Keep it out of repositories. `deepmem forget` deletes it.
   returned to an agent.
 - **Forget:** `deepmem forget --last 1h` or `deepmem forget --all` deletes
   captured data, overwrites it in the database file, and removes the
-  memories distilled from that period.
+  memories distilled from that period. In `facts.md` and `preferences.md`
+  it removes every fact whose sources all lie in that period, pinned or
+  not; lines you wrote by hand have no sources and stay. `--all` deletes
+  the two files as well.
 - **Status:** `deepmem status`.
 
 Run the CLI with `uv run --directory /absolute/path/to/deep-memory/memory deepmem <command>`.
