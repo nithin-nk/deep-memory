@@ -50,9 +50,9 @@
     display: flex; align-items: center; gap: 16px; padding: 10px 16px;
     border-bottom: 1px solid var(--line); background: var(--panel);
   }
-  nav { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--line); }
-  nav button { border: 0; background: none; padding: 4px 14px; }
-  nav button[aria-selected=true] { background: var(--bg); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+  nav, .seg { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--line); }
+  nav button, .seg button { border: 0; background: none; padding: 4px 14px; }
+  nav button[aria-selected=true], .seg button[aria-selected=true] { background: var(--bg); font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
   #state { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
   .paused .dot { background: var(--warn); }
@@ -63,21 +63,43 @@
   .page { overflow: auto; padding: 22px 28px 40px; flex: 1; }
   .page > div { max-width: 620px; }
 
-  /* Memories */
-  #list-pane { width: 320px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  /* Memories: projects on the left; per project Facts, Preferences, Episodes */
+  #projects-pane { width: 200px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
   #search { margin: 10px; }
-  #list { flex: 1; overflow: auto; margin: 0; padding: 0 6px 10px; list-style: none; }
-  #list li { padding: 8px 10px; border-radius: 7px; }
-  #list li[aria-selected=true] { background: var(--select); }
+  .label { padding: 4px 16px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  #projects, #list { flex: 1; overflow: auto; margin: 0; padding: 0 6px 10px; list-style: none; }
+  #projects li, #list li { padding: 7px 10px; border-radius: 7px; }
+  #projects li[aria-selected=true], #list li[aria-selected=true] { background: var(--select); }
+  #projects .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #projects .sub { color: var(--muted); font-size: 12px; }
+  #project { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #project-head { padding: 14px 20px 12px; border-bottom: 1px solid var(--line); }
+  #project-head h2 { margin-bottom: 10px; }
+  #kind-hint { margin: 8px 0 0; }
+  #kinds { display: inline-flex; }
+  #kinds .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  #durable { flex: 1; overflow: auto; padding: 16px 20px 40px; }
+  #durable > * { max-width: 720px; }
+  .tools { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; }
+  .tools .error { margin: 0; }
+  .facts { margin: 0 0 14px; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; }
+  .facts li { padding: 9px 14px; border-top: 1px solid var(--line); }
+  .facts li:first-child { border-top: 0; }
+  .facts .text { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; -webkit-user-select: text; cursor: text; }
+  .facts .meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+  .facts .meta button { border: 0; background: none; padding: 0; color: var(--accent); }
+  .facts .meta button:hover { text-decoration: underline; }
+  .badge { padding: 0 6px; margin-right: 6px; border-radius: 4px; background: var(--select); color: var(--text); font-weight: 600; }
+  #episodes { flex: 1; min-height: 0; display: flex; }
+  #list-pane { width: 270px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  #list { padding-top: 8px; }
   #list .when { font-weight: 600; }
   #list .apps { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #list .summary {
     margin-top: 2px; color: var(--muted); overflow: hidden;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   }
-  #count { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-  #reader { flex: 1; min-width: 0; overflow: auto; padding: 22px 28px 40px; }
-  #reader .tools { display: flex; align-items: center; gap: 8px; margin: 10px 0 18px; }
+  #reader { flex: 1; min-width: 0; overflow: auto; padding: 16px 24px 40px; }
   #reader article { max-width: 680px; font-size: 14px; line-height: 1.55; -webkit-user-select: text; cursor: text; }
   #reader article ul { padding-left: 20px; margin: 0 0 10px; }
   #reader article li { margin-bottom: 3px; overflow-wrap: anywhere; }
@@ -120,12 +142,23 @@
 
 <main>
   <section id="memories" class="active">
-    <div id="list-pane">
+    <div id="projects-pane">
       <input id="search" type="search" placeholder="Search memories" aria-label="Search memories">
-      <ul id="list" role="listbox" aria-label="Memories"></ul>
-      <div id="count"></div>
+      <div class="label">Projects</div>
+      <ul id="projects" role="listbox" aria-label="Projects"></ul>
     </div>
-    <div id="reader"></div>
+    <div id="project">
+      <div id="project-head">
+        <h2 id="project-name"></h2>
+        <div id="kinds" class="seg" role="tablist" aria-label="Kind of memory"></div>
+        <p id="kind-hint" class="muted"></p>
+      </div>
+      <div id="durable"></div>
+      <div id="episodes">
+        <div id="list-pane"><ul id="list" role="listbox" aria-label="Episodes"></ul></div>
+        <div id="reader"></div>
+      </div>
+    </div>
   </section>
 
   <section id="blocked">
@@ -244,6 +277,7 @@ for (const tab of document.querySelectorAll("nav button")) {
 const number = new Intl.NumberFormat();
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const timeOnly = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+const dateOnly = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
 function showStatus(status) {
   $("state").classList.toggle("paused", status.paused);
@@ -263,47 +297,215 @@ $("pause").onclick = () => call("toggle_pause").then(showStatus);
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 3000);
 
 // --- memories ---
-let selected = null; // file of the open memory
+// One project at a time, and inside it one kind of memory at a time:
+// facts.md and preferences.md (what stays true, written by `deepmem
+// consolidate`) or the episodes (what happened in each work session).
+const KINDS = {
+  facts: { label: "Facts", hint: "What stays true about this project: how it is built and what was decided." },
+  preferences: { label: "Preferences", hint: "How you want work done in this project." },
+  episodes: { label: "Episodes", hint: "What happened in each work session, newest first." },
+};
+let all = [];        // every memory file that matches the search
+let project = null;  // directory under memories/
+let kind = "facts";
+let selected = null; // file of the open episode
+let drawn = 0;       // a newer render makes an older, slower one stop
+
+const words = () => $("search").value.toLowerCase().split(/\s+/).filter(Boolean);
+const projectOf = (memory) => { const parts = String(memory.file).split("/"); return parts.length > 1 ? parts[0] : "_unsorted"; };
+const projectLabel = (name) => (name === "personal" ? "Personal" : name === "_unsorted" ? "Unsorted" : name);
+const inProject = (kindOf) => all.filter((m) => projectOf(m) === project && (kindOf === "episodes" ? !KINDS[m.type] : m.type === kindOf));
+const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 function when(memory) {
-  // facts.md and preferences.md hold what stays true: no time range, named by project.
-  if (memory.type === "facts" || memory.type === "preferences") {
-    const project = String(memory.file).split("/")[0];
-    return `${memory.type === "facts" ? "Facts" : "Preferences"} · ${project}`;
-  }
   const start = new Date(memory.start), end = new Date(memory.end);
   if (!memory.start || isNaN(start)) return String(memory.file).replace(/^.*\//, ""); // hand-written file
   return isNaN(end) ? dateTime.format(start) : `${dateTime.format(start)} – ${timeOnly.format(end)}`;
 }
 const appList = (apps) => (Array.isArray(apps) ? apps.join(", ") : "");
 
+function option(selectedNow, choose, ...children) {
+  const item = el("li", { role: "option", tabIndex: 0 }, ...children);
+  item.setAttribute("aria-selected", selectedNow);
+  item.onclick = choose;
+  item.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") choose(); };
+  return item;
+}
+
 async function loadMemories() {
-  const query = $("search").value.trim();
-  const memories = await call("memories_list", { query });
-  $("list").replaceChildren(...memories.map((memory) => {
-    const item = el("li", { role: "option", tabIndex: 0 },
+  all = await call("memories_list", { query: $("search").value.trim() });
+  // Real projects first, then personal activity, then files from before projects.
+  const rank = (name) => (name === "_unsorted" ? 2 : name === "personal" ? 1 : 0);
+  const names = [...new Set(all.map(projectOf))]
+    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, undefined, { sensitivity: "base" }));
+  if (!names.includes(project)) pick(names[0] ?? null);
+  else if (!inProject(kind).length) pick(project); // the search left nothing of this kind
+  $("projects").replaceChildren(...names.map((name) => {
+    const mine = all.filter((m) => projectOf(m) === name);
+    const episodes = mine.filter((m) => !KINDS[m.type]).length;
+    const sub = words().length ? `${plural(mine.length, "file")} matching`
+      : plural(episodes, "episode") + (mine.length > episodes ? " · facts" : "");
+    return option(name === project, () => { pick(name); loadMemories(); },
+      el("div", { className: "name", textContent: projectLabel(name) }),
+      el("div", { className: "sub", textContent: sub }));
+  }));
+  return showProject();
+}
+
+// Open a project on the first kind it has something of.
+function pick(name) {
+  project = name;
+  kind = ["facts", "preferences", "episodes"].find((k) => inProject(k).length) ?? "facts";
+}
+
+function showProject() {
+  const shown = ++drawn;
+  $("project-head").hidden = !project;
+  $("episodes").style.display = project && kind === "episodes" ? "flex" : "none";
+  $("durable").style.display = project && kind === "episodes" ? "none" : "block";
+  if (!project) {
+    return $("durable").replaceChildren(el("p", { className: "muted", textContent: words().length
+      ? "No memory contains those words."
+      : "No memories yet. They appear here after deepmem distill has run." }));
+  }
+  $("project-name").textContent = projectLabel(project);
+  $("kind-hint").textContent = project === "personal" && kind === "episodes"
+    ? "What you did outside any project. Coding agents inside a project cannot read this unless you allow it in the settings file."
+    : KINDS[kind].hint;
+  $("kinds").replaceChildren(...Object.entries(KINDS).map(([name, { label }]) => {
+    const files = inProject(name);
+    const count = name === "episodes" ? files.length : files[0]?.entries ?? 0;
+    const tab = el("button", { role: "tab" }, label, el("span", { className: "n", textContent: count }));
+    tab.setAttribute("aria-selected", name === kind);
+    tab.onclick = () => { kind = name; showProject(); };
+    return tab;
+  }));
+  return kind === "episodes" ? showEpisodes(shown) : showDurable(shown);
+}
+
+// Buttons shared by every file view: reveal it, delete it (the second click deletes).
+function tools(file, deleteLabel, error) {
+  const remove = el("button", { className: "danger", textContent: "Delete…" });
+  const cancel = el("button", { textContent: "Cancel", hidden: true });
+  const reveal = el("button", { textContent: "Show in Finder" });
+  reveal.onclick = () => call("memory_reveal", { file }).catch((e) => { error.textContent = e.message; });
+  remove.onclick = async () => {
+    if (cancel.hidden) {
+      remove.textContent = deleteLabel;
+      cancel.hidden = false;
+      return;
+    }
+    try {
+      await call("memory_delete", { file });
+      if (selected === file) selected = null;
+      await loadMemories();
+    } catch (e) {
+      error.textContent = e.message;
+    }
+  };
+  cancel.onclick = () => { remove.textContent = "Delete…"; cancel.hidden = true; };
+  return el("div", { className: "tools" }, reveal, remove, cancel, error);
+}
+
+// --- facts and preferences: one row per entry ---
+// "- text (sources: a, b; confirmed: 2026-11-14) (pinned)", as consolidate.py writes it.
+function parseFact(text) {
+  const pinned = text.endsWith("(pinned)");
+  if (pinned) text = text.slice(0, -"(pinned)".length).trim();
+  const tail = text.match(/ \(sources: ([^()]*); confirmed: (\d{4})-(\d{2})-(\d{2})\)$/);
+  if (!tail) return { text, pinned, sources: [] };
+  return {
+    text: text.slice(0, tail.index), pinned,
+    sources: tail[1].split(",").map((source) => source.trim()).filter(Boolean),
+    confirmed: new Date(tail[2], tail[3] - 1, tail[4]),
+  };
+}
+
+// An episode file is named after its start: 2026-11-14T101005[-part2].
+function sourceLabel(name) {
+  const t = name.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d)(\d\d)(\d\d)/);
+  return t ? dateTime.format(new Date(t[1], t[2] - 1, t[3], t[4], t[5], t[6])) : name;
+}
+
+async function showDurable(shown) {
+  const pane = $("durable");
+  const [item] = inProject(kind);
+  const noun = kind === "facts" ? "facts" : "preferences";
+  if (!item) {
+    return pane.replaceChildren(el("p", { className: "muted", textContent: words().length
+      ? `No ${noun} of this project contain those words.`
+      : `No ${noun} yet. deepmem consolidate writes them from this project's episodes.` }));
+  }
+  let memory;
+  try {
+    memory = await call("memory_get", { file: item.file });
+  } catch (error) {
+    return loadMemories(); // deleted outside the window
+  }
+  if (shown !== drawn) return;
+
+  const error = el("span", { className: "error", role: "alert" });
+  const nodes = [tools(item.file, `Delete all ${noun} of this project`, error)];
+  let list = null;
+  for (const line of memory.body.split("\n")) {
+    const text = line.trim();
+    const bullet = text.match(/^[-*]\s+(.*)$/);
+    if (!bullet) { // headings and prose the user wrote
+      list = null;
+      if (text) nodes.push(el("p", { textContent: text.replace(/^#+\s+/, "") }));
+      continue;
+    }
+    if (!words().every((word) => text.toLowerCase().includes(word))) continue;
+    const fact = parseFact(bullet[1]);
+    const meta = el("div", { className: "meta" });
+    if (fact.pinned) meta.append(el("span", { className: "badge", textContent: "Pinned" }));
+    if (!fact.sources.length) meta.append(fact.pinned ? "Never changed by the consolidator" : "Written by hand");
+    else {
+      meta.append(`Confirmed ${dateOnly.format(fact.confirmed)} · from `);
+      fact.sources.forEach((source, index) => {
+        const link = el("button", { textContent: sourceLabel(source) });
+        link.onclick = () => openSource(`${project}/${source}.md`, error);
+        meta.append(index ? ", " : "", link);
+      });
+    }
+    if (!list) nodes.push(list = el("ul", { className: "facts" }));
+    list.append(el("li", {}, el("div", { className: "text", textContent: fact.text }), meta));
+  }
+  nodes.push(el("p", { className: "muted", textContent:
+    "To change an entry, edit the file (Show in Finder). End a line with (pinned) and the consolidator never changes or removes it." }));
+  pane.replaceChildren(...nodes);
+  pane.scrollTop = 0;
+}
+
+// From a fact to the episode it came from, if retention has not deleted it.
+async function openSource(file, error) {
+  try {
+    await call("memory_get", { file });
+  } catch (e) {
+    error.textContent = "That episode has been deleted; the fact stays.";
+    return;
+  }
+  $("search").value = "";
+  selected = file;
+  kind = "episodes";
+  await loadMemories();
+}
+
+// --- episodes: list and reader ---
+function showEpisodes(shown) {
+  const episodes = inProject("episodes");
+  if (!episodes.some((memory) => memory.file === selected)) selected = episodes[0]?.file ?? null; // newest, or best match
+  $("list").replaceChildren(...episodes.map((memory) => {
+    const item = option(memory.file === selected, () => { selected = memory.file; showProject(); },
       el("div", { className: "when", textContent: when(memory) }),
       el("div", { className: "apps", textContent: appList(memory.apps) }),
       el("div", { className: "summary", textContent: memory.summary }));
-    item.dataset.file = memory.file;
-    item.setAttribute("aria-selected", memory.file === selected);
-    item.onclick = () => openMemory(memory.file);
-    item.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") openMemory(memory.file); };
     return item;
   }));
-  $("count").textContent = query
-    ? `${memories.length} matching`
-    : `${memories.length} ${memories.length === 1 ? "memory" : "memories"}`;
-  if (memories.some((memory) => memory.file === selected)) return;
-  selected = null;
-  if (memories.length) return openMemory(memories[0].file); // newest, or best match
-  showEmpty(query ? "No memory contains those words."
-    : "No memories yet. They appear here after deepmem distill has run.");
-}
-
-function showEmpty(message) {
-  $("reader").replaceChildren(el("div", { className: "empty", textContent: message }));
-  $("reader").style.display = "flex";
+  if (selected) return openMemory(selected, shown);
+  $("reader").replaceChildren(el("p", { className: "muted", textContent: words().length
+    ? "No episode of this project contains those words."
+    : "No episodes yet. They appear here after deepmem distill has run." }));
 }
 
 // Headings, lists and paragraphs only; everything else stays plain text.
@@ -326,7 +528,7 @@ function renderMarkdown(body) {
   return nodes;
 }
 
-async function openMemory(file) {
+async function openMemory(file, shown) {
   let memory;
   try {
     memory = await call("memory_get", { file });
@@ -334,36 +536,11 @@ async function openMemory(file) {
     if (selected === file) selected = null;
     return loadMemories(); // deleted outside the window
   }
-  selected = file;
-  for (const item of $("list").children) item.setAttribute("aria-selected", item.dataset.file === file);
-
-  const error = el("span", { className: "error", role: "alert" });
-  const remove = el("button", { className: "danger", textContent: "Delete…" });
-  const cancel = el("button", { textContent: "Cancel", hidden: true });
-  const reveal = el("button", { textContent: "Show in Finder" });
-  reveal.onclick = () => call("memory_reveal", { file }).catch((e) => { error.textContent = e.message; });
-  // First click asks, second click deletes.
-  remove.onclick = async () => {
-    if (cancel.hidden) {
-      remove.textContent = "Delete this memory";
-      cancel.hidden = false;
-      return;
-    }
-    try {
-      await call("memory_delete", { file });
-      selected = null;
-      await loadMemories();
-    } catch (e) {
-      error.textContent = e.message;
-    }
-  };
-  cancel.onclick = () => { remove.textContent = "Delete…"; cancel.hidden = true; };
-
-  $("reader").style.display = "block";
+  if (shown !== drawn) return;
   $("reader").replaceChildren(
     el("h2", { textContent: when({ ...memory.front, file }) }),
-    el("div", { className: "muted", textContent: appList(memory.front.apps) }),
-    el("div", { className: "tools" }, reveal, remove, cancel, error),
+    el("div", { className: "muted", textContent: appList(memory.front.apps), style: "margin-bottom: 10px" }),
+    tools(file, "Delete this episode", el("span", { className: "error", role: "alert" })),
     el("article", {}, ...renderMarkdown(memory.body)));
   $("reader").scrollTop = 0;
 }
@@ -434,8 +611,7 @@ $("settings-form").onsubmit = async (event) => {
 // --- start; also called by the Rust side each time the window is shown ---
 window.deepmemShown = () => {
   refreshStatus();
-  const open = selected;
-  loadMemories().then(() => { if (open && open === selected) openMemory(open); });
+  loadMemories();
   call("config_get").then(showConfig).catch((e) => { $("site-error").textContent = e.message; });
 };
 deepmemShown();

@@ -616,6 +616,18 @@ scores.)
   (1 new) and 50 Python tests pass after the merge; the page was checked in
   a browser with the real files through a stubbed bridge. Not verified: the
   real window (the user's running daemon is an older build).
+- Second follow-up ("every type of memory in the same panel and no
+  project differences"): the Memories tab was rebuilt. Projects are listed
+  on the left (real projects, then Personal, then Unsorted). A project
+  opens on three separate views: Facts, Preferences, Episodes, each with a
+  count and a one-line explanation. A fact is a row with its confirmed
+  date, links to its source episodes, and a "Pinned" or "Written by hand"
+  mark; a link to an episode that retention deleted says so. Search counts
+  matching facts one by one. Verified: 15 Rust tests; the page in a browser
+  at the window's size (980 x 660) with the real files through a stubbed
+  bridge: all three views, a pinned line, a hand-written line, a deleted
+  source, search, Personal. Not verified: inside the real WKWebView window;
+  editing or pinning from the window (still done in the file).
 - Decisions made by the agent; the user approved the design without
   answering these three questions:
   - Operations instead of a full rewrite. The plan said the model returns

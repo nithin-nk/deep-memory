@@ -146,8 +146,10 @@ last confirmed:
   sources is kept until an episode contradicts it. Lines that are not
   bullets (headings, prose) are never touched.
 - `recall` finds these files like episodes, within the same project.
-- The window lists them above the episodes, as "Facts · project" and
-  "Preferences · project".
+- The window shows one project at a time (list on the left) and, inside it,
+  Facts, Preferences and Episodes as separate views. Each fact shows when it
+  was last confirmed and links to the episodes it came from. Search looks at
+  facts one by one and at episodes as a whole.
 - `deepmem distill --watch` runs the same job once a day, under the same
   power rule as distillation. `deepmem consolidate` itself runs at once.
 - An unusable model reply is retried once. After that the files stay

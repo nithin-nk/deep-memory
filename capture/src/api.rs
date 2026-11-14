@@ -121,7 +121,8 @@ fn is_durable(kind: &Value) -> bool {
 }
 
 /// Durable files first, then episodes, newest first. With a query, only
-/// memories that contain every word of it.
+/// episodes that contain every word of it, and durable files with at least
+/// one entry that does (`entries` then counts those).
 // ponytail: reads every file on each call and matches substrings. The Python
 // side owns the FTS index; query it instead if thousands of files make this slow.
 fn memories_list(ctx: &Context, query: &str) -> Value {
@@ -133,19 +134,22 @@ fn memories_list(ctx: &Context, query: &str) -> Value {
     for path in files {
         let Ok(text) = fs::read_to_string(&path) else { continue };
         let (front, body) = parse_memory(&text);
-        let haystack = body.to_lowercase();
-        if !words.iter().all(|word| haystack.contains(word)) {
+        let matches = |text: &str| {
+            let text = text.to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        };
+        // A durable file is a list of entries, and each entry is searched on
+        // its own; an episode is searched as a whole and starts with its summary.
+        let entries = is_durable(&front["type"])
+            .then(|| body.lines().filter(|l| (l.starts_with("- ") || l.starts_with("* ")) && matches(l)).count());
+        if entries == Some(0) && !words.is_empty() || entries.is_none() && !matches(body) {
             continue;
         }
-        let summary = if is_durable(&front["type"]) {
-            let count = body.lines().filter(|l| l.starts_with("- ") || l.starts_with("* ")).count();
-            format!("{count} {}", if count == 1 { "entry" } else { "entries" })
-        } else {
-            body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or("").to_string()
-        };
+        let summary = body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or("");
         items.push(json!({
             "file": path.strip_prefix(&root).unwrap_or(&path),
             "type": front["type"],
+            "entries": entries,
             "start": front["start"],
             "end": front["end"],
             "apps": front["apps"],
@@ -258,10 +262,13 @@ mod tests {
         let all = all["ok"].as_array().unwrap();
         let files: Vec<&str> = all.iter().map(|m| m["file"].as_str().unwrap()).collect();
         assert_eq!(files, ["alpha/facts.md", "alpha/preferences.md", "_unsorted/a.md", "_unsorted/b.md"]);
-        assert_eq!((&all[0]["type"], &all[0]["summary"]), (&json!("facts"), &json!("2 entries")));
-        assert_eq!((&all[1]["type"], &all[1]["summary"]), (&json!("preferences"), &json!("1 entry")));
+        assert_eq!((&all[0]["type"], &all[0]["entries"]), (&json!("facts"), &json!(2)));
+        assert_eq!((&all[1]["type"], &all[1]["entries"]), (&json!("preferences"), &json!(1)));
+        assert!(all[2]["entries"].is_null());
         let found = call(&ctx, "memories_list", json!({ "query": "sqlite" }));
-        assert_eq!(found["ok"][0]["file"], "alpha/facts.md");
+        assert_eq!((&found["ok"][0]["file"], &found["ok"][0]["entries"]), (&json!("alpha/facts.md"), &json!(1)));
+        // Words spread over two entries match no entry.
+        assert_eq!(call(&ctx, "memories_list", json!({ "query": "sqlite hand" }))["ok"], json!([]));
     }
 
     #[test]
